@@ -11,6 +11,7 @@ const failures = [];
 function ok(cond, label) {
   if (cond) {
     pass++;
+    console.log("PASS:", label);
   } else {
     fail++;
     failures.push(label);
