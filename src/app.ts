@@ -1,5 +1,6 @@
 import express, { Express } from "express";
 import { config } from "./config";
+import { Errors } from "./errors";
 import { authMiddleware } from "./middleware/auth";
 import { errorHandler } from "./middleware/errorHandler";
 import healthRouter from "./routes/health";
@@ -29,6 +30,10 @@ export function createApp(): Express {
   app.use("/v1", authMiddleware);
   app.use(reviewsRouter);
   app.use(streamRouter);
+
+  // Anything unmatched gets the error envelope rather than Express's default
+  // HTML 404 page, so every non-2xx response on this service has one shape.
+  app.use((_req, _res, next) => next(Errors.notFound("No such route")));
 
   app.use(errorHandler);
 
