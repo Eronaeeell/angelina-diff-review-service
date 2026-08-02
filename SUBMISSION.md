@@ -111,10 +111,11 @@ The reasoning for the original rejection wasn't unsound — deploy risk before a
 
 ## What I'd do next with more time
 
-To be clear about what these are and aren't: **neither the deterministic `mock` provider nor sourcing the `llm` path from a free tier are limitations** — the spec requires the former and explicitly says you don't need to pay for the latter. The real limitations:
+To be clear about what these are and aren't: **neither the deterministic `mock` provider nor sourcing the `llm` path from a free tier are limitations** — the spec requires the former and explicitly says you don't need to pay for the latter. Also not a live limitation, but worth stating since it's the single biggest improvement in this submission and explains why timeout numbers in this doc changed mid-build: **vendor choice mattered more than any code I wrote.** On OpenRouter's free tier the same 3-line diff measured 19.4s, 22s (timeout), 22s (timeout), 10.6s — a coin flip, because free shared capacity is queue-dominated and model size is irrelevant to it. Moving to Groq's dedicated inference took the same work to ~0.6s, a 25-40x improvement, with no code change at all. That's resolved and deployed, not open work.
+
+The real, still-open limitations:
 
 - **In-memory-only state.** A process restart mid-window (crash, platform hiccup, redeploy) loses every job's history — no persistence.
-- **Vendor choice turned out to matter more than any code I wrote.** On OpenRouter's free tier the same 3-line diff measured 19.4s, 22s (timeout), 22s (timeout), 10.6s — a coin flip, because free shared capacity is queue-dominated and model size is irrelevant to it. Moving to Groq's dedicated inference took the same work to ~0.6s, a 25-40x improvement, with no code change at all. I had been tuning timeouts against a constraint that was never in my code.
 - **Regex/brace-depth heuristics for MOCK-003/004, not a real parser.** A sufficiently adversarial diff could still evade or misfire in edge cases beyond what's been tested (e.g. unusual string/comment constructs).
 - **The secondary vendor is one model, not a chain.** If Groq's whole chain fails and the OpenRouter fallback's single model also fails or is quota-exhausted, the job fails -- there's no third vendor. Extending `LLM_FALLBACK_*` to a list, matching the primary vendor's model+fallbackModels shape, is the natural next step.
 - **Single-process deployment.** Rate limiting and concurrency caps live in one process's memory; they wouldn't hold up across multiple instances.
@@ -122,6 +123,8 @@ To be clear about what these are and aren't: **neither the deterministic `mock` 
 
 **Priority order given more time:**
 1. Persist job/cache/idempotency state.
-2. Bound `llm` queue-wait time.
+2. Extend the secondary vendor to a full fallback chain, not a single model.
 3. Replace the MOCK-003/004 heuristics with a lightweight real parser.
 4. Move rate-limit/concurrency state to something shared (e.g. Redis) so the service could scale horizontally.
+
+(Bounding `llm` queue-wait time was on this list until it was measured, found real, and fixed — bug 7 above.)
