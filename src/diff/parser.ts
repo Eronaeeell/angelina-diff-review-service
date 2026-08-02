@@ -8,15 +8,21 @@ export interface ParsedDiff {
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
-function stripPrefix(path: string, hasGitHeaders: boolean): string {
+/**
+ * Strips the conventional `a/`/`b/` diff prefixes. Applied unconditionally,
+ * not just when `diff --git` headers are present: a hand-written unified diff
+ * frequently carries the prefixes without the `diff --git` line, and leaving
+ * them on would put `b/` into every finding's `path` and `id`.
+ */
+function stripPrefix(path: string): string {
   if (path === "/dev/null") return path;
-  if (hasGitHeaders && (path.startsWith("a/") || path.startsWith("b/"))) {
+  if (path.startsWith("a/") || path.startsWith("b/")) {
     return path.slice(2);
   }
   return path;
 }
 
-function extractPath(blockLines: string[], marker: "+++" | "---", hasGitHeaders: boolean): string | null {
+function extractPath(blockLines: string[], marker: "+++" | "---"): string | null {
   for (const line of blockLines) {
     if (line.startsWith(marker + " ")) {
       let rest = line.slice(4);
@@ -24,7 +30,7 @@ function extractPath(blockLines: string[], marker: "+++" | "---", hasGitHeaders:
       // strip trailing tab-separated timestamp, e.g. "b/foo.ts\t2024-01-01 ..."
       const tabIdx = rest.indexOf("\t");
       if (tabIdx !== -1) rest = rest.slice(0, tabIdx);
-      return stripPrefix(rest.trim(), hasGitHeaders);
+      return stripPrefix(rest.trim());
     }
   }
   return null;
@@ -49,17 +55,26 @@ export function parseUnifiedDiff(raw: string): ParsedDiff | null {
     const line = lines[i];
     if (hasGitHeaders) {
       if (line.startsWith("diff --git ")) boundaries.push(i);
-    } else if (line.startsWith("--- ")) {
+    } else if (line.startsWith("--- ") && (lines[i + 1] ?? "").startsWith("+++ ")) {
+      // Without `diff --git` markers, a `--- ` line only starts a new file
+      // block if the very next line is its `+++ ` counterpart -- otherwise a
+      // *removed* line whose content happens to begin with "-- " would split
+      // the diff at the wrong place.
       boundaries.push(i);
     }
   }
 
   if (boundaries.length === 0) return null;
 
+  // Detected over the whole input rather than per file block: a diff that only
+  // deletes files skips the per-block body loop below, but is still a valid
+  // parseable diff (it just yields no added lines, hence no findings).
+  const anyHunkFound = lines.some((l) => HUNK_HEADER.test(l));
+  if (!anyHunkFound) return null;
+
   const files: DiffFileBlock[] = [];
   const addedLines: ParsedAddedLine[] = [];
   const lineRecordsByPath = new Map<string, LineRecord[]>();
-  let anyHunkFound = false;
 
   for (let b = 0; b < boundaries.length; b++) {
     const start = boundaries[b];
@@ -67,8 +82,8 @@ export function parseUnifiedDiff(raw: string): ParsedDiff | null {
     const blockLines = lines.slice(start, end);
     const rawBlock = blockLines.join("");
 
-    const newPath = extractPath(blockLines, "+++", hasGitHeaders);
-    const oldPath = extractPath(blockLines, "---", hasGitHeaders);
+    const newPath = extractPath(blockLines, "+++");
+    const oldPath = extractPath(blockLines, "---");
     const path = newPath && newPath !== "/dev/null" ? newPath : oldPath ?? newPath ?? `file-${b}`;
 
     files.push({
@@ -87,13 +102,15 @@ export function parseUnifiedDiff(raw: string): ParsedDiff | null {
     for (const line of blockLines) {
       const hunkMatch = HUNK_HEADER.exec(line);
       if (hunkMatch) {
-        anyHunkFound = true;
         newLineCounter = parseInt(hunkMatch[3], 10);
         continue;
       }
-      if (newLineCounter === -1) continue; // before first hunk in this block
-
-      if (line.startsWith("+++") || line.startsWith("---")) continue;
+      // Before the first hunk in this block -- this is where the `---`/`+++`
+      // file headers live, so they're skipped here. Deliberately NOT skipped
+      // once a hunk has started: inside a hunk, `+++foo` is an added line
+      // whose content is `++foo`, and dropping it would desync every
+      // subsequent line number in the file.
+      if (newLineCounter === -1) continue;
 
       if (line.startsWith("+")) {
         const text = line.slice(1).replace(/\r?\n$/, "");
@@ -112,8 +129,6 @@ export function parseUnifiedDiff(raw: string): ParsedDiff | null {
       }
     }
   }
-
-  if (!anyHunkFound) return null;
 
   return { files, addedLines, lineRecordsByPath };
 }
