@@ -40,7 +40,6 @@ export function createJob(jobId: string, diff: string, options: ReviewOptions, h
     createdAt: Date.now(),
     contentHash: hash,
     waiters: [],
-    doneWaiters: [],
   };
   jobs.set(jobId, job);
   return job;
@@ -69,4 +68,11 @@ export function setCached(hash: string, entry: CacheEntry): void {
 export function emitEvent(job: Job, event: StreamEvent): void {
   job.events.push(event);
   for (const waiter of job.waiters.slice()) waiter(event);
+}
+
+export function subscribe(job: Job, onEvent: (ev: StreamEvent) => void): () => void {
+  job.waiters.push(onEvent);
+  return () => {
+    job.waiters = job.waiters.filter((w) => w !== onEvent);
+  };
 }

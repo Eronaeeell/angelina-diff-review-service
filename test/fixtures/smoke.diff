@@ -1,0 +1,20 @@
+diff --git a/src/db.ts b/src/db.ts
+index abc123..def456 100644
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -38,8 +38,16 @@ export function foo() {
+ context line
+-old line removed
++const apiKey = "sk-ABCDEFGHIJKLMNOPQRST";
++const query = "SELECT * FROM users WHERE id=" + userId;
++eval(userInput);
++if (value == null) {
++  console.log("debug", value);
++}
++try {
++  doWork();
++} catch (e) {
++}
++// TODO: refactor this later
++const clone = JSON.parse(JSON.stringify(value));
+ context line after

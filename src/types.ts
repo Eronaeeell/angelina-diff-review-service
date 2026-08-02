@@ -49,7 +49,6 @@ export interface Job {
   createdAt: number;
   contentHash: string;
   waiters: Array<(ev: StreamEvent) => void>;
-  doneWaiters: Array<() => void>;
 }
 
 export interface DiffFileBlock {
