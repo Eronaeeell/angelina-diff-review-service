@@ -69,11 +69,11 @@ Two independent live test suites run against the deployed service (no code execu
 
 | Suite | Checks | Covers |
 |---|---|---|
-| `test/verify.mjs` | 50 | Every rule, ordering/dedup, error codes, idempotency, caching, chunking, SSE replay, concurrency, rate limits, unknown-field tolerance |
+| `test/verify.mjs` | 59 | Every rule, ordering/dedup, error codes, idempotency, caching, chunking, SSE replay, concurrency, rate limits, unknown-field tolerance, non-git diff shapes |
 | `test/proof-scoring-criteria.mjs` | 50 | Same ground, organized 1:1 against the task's own scoring categories, plus a live `llm` call |
 | `test/demo*.mjs` | — | Human-readable diff-in/findings-out walkthroughs (no assertions, just readable output) |
 
-Run any of them the same way shown above (`BASE`/`TOKEN` env vars). Running these repeatedly against the live service is what caught two real bugs (an undersized rate-limit burst, a false-positive regex on `=== null`) — details in `SUBMISSION.md`.
+Run any of them the same way shown above (`BASE`/`TOKEN` env vars). Running these repeatedly against the live service — and probing diff shapes the suite didn't originally cover — is what caught five real bugs, including one that would have put `b/` into every finding's `path` and `id`. Details in `SUBMISSION.md`.
 
 ## Environment variables
 

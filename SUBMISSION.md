@@ -48,15 +48,20 @@ Both providers implement one interface — `reviewChunk(files, addedLines, lineR
 
 Two independent, assertion-based suites run against the **live deployed instance** (black-box HTTP, no unit tests against internal functions — the contract is explicitly an HTTP contract):
 
-- **`test/verify.mjs` (50 checks):** every mock rule individually (incl. same-line/multi-line/negative empty-catch cases, and negative tests for two false-positive bugs I found — see below), cross-file/cross-line ordering + no-duplicate-ids, `maxFindings` truncation vs. `usage` reflecting the full scan, the full error taxonomy, idempotency, caching, chunking on a >64KiB/4-file diff, SSE replay (finding events from a completed job's stream compared byte-for-byte against the poll endpoint's `findings`, including a cache-hit job — which didn't emit finding events at all until I went looking), 5-way concurrent submission, and rate-limit burst behavior.
+- **`test/verify.mjs` (59 checks):** every mock rule individually (incl. same-line/multi-line/negative empty-catch cases, and negative tests for two false-positive bugs I found — see below), cross-file/cross-line ordering + no-duplicate-ids, `maxFindings` truncation vs. `usage` reflecting the full scan, the full error taxonomy, idempotency, caching, chunking on a >64KiB/4-file diff, SSE replay (finding events from a completed job's stream compared byte-for-byte against the poll endpoint's `findings`, including a cache-hit job — which didn't emit finding events at all until I went looking), 5-way concurrent submission, and rate-limit burst behavior.
 - **`test/proof-scoring-criteria.mjs` (50 checks):** the same ground, reorganized 1:1 against the task's own "What we score" list, plus one live `llm`-provider call.
 - **`test/demo*.mjs`:** readable (non-assertion) walkthroughs for manually eyeballing diff-in vs. findings-out, including a dedicated chunking proof that submits the same files both under and over 64KiB and diffs the resulting findings.
 
-**Two real bugs were only found by running the suite repeatedly against the same live process:**
-1. An undersized rate-limit burst (10, raised to 30 — one full minute's sustained quota) that wrongly throttled a legitimate rapid-fire correctness-check run.
-2. A regex false positive: `=== null` / `!== null` was wrongly matching the loose-null-comparison rule.
+**Five real bugs were found by running against a live process rather than by reading the code:**
+1. **The parser only stripped `a/`/`b/` path prefixes when the diff carried `diff --git` headers.** A hand-written unified diff (prefixes, no `diff --git` line) produced `MOCK-003:b/src/db.ts:41` instead of `MOCK-003:src/db.ts:41` — a wrong `path` and `id` on *every* finding. The prefix strip is now unconditional. This is the one I'd have most regretted missing: the suite only ever generated `git diff`-shaped input, so it was invisible until I deliberately fed the service other legal diff shapes.
+2. **A deletion-only diff was rejected `422 invalid_diff`.** The "did I see a hunk?" flag was only set inside the per-file body loop, which is skipped for `+++ /dev/null` targets — so a diff that only deletes files looked unparseable. It's valid input that legitimately yields zero findings.
+3. **An added line whose content began with `++`** was mistaken for a `+++` file header and dropped without advancing the line counter, shifting every subsequent line number in that file.
+4. An undersized rate-limit burst (10, raised to 30 — one full minute's sustained quota) that wrongly throttled a legitimate rapid-fire correctness-check run.
+5. A regex false positive: `=== null` / `!== null` was wrongly matching the loose-null-comparison rule.
 
-Both are documented in git history rather than silently changed.
+Each has a regression check in `verify.mjs` and is documented in git history rather than silently changed.
+
+**A note on how #1–#3 were found, since it's the more useful lesson:** all three are parser bugs, and all three were invisible to a 50-check suite that was *green*. The suite's diff fixtures were all built by one helper that emitted `git diff` output, so the tests agreed with the implementation about what a diff looks like. Nothing was found until I stopped asking "do my tests pass?" and started asking "what legal input have I never fed this?" — non-git diffs, `diff -u` output, deletion-only diffs, added lines that mimic diff syntax.
 
 ## AI tools used
 
@@ -81,6 +86,7 @@ To be clear about what these are and aren't: **neither the deterministic `mock` 
 - **The `llm` provider's queue-wait time isn't bounded** (see above) — only its own per-job processing time is.
 - **Regex/brace-depth heuristics for MOCK-003/004, not a real parser.** A sufficiently adversarial diff could still evade or misfire in edge cases beyond what's been tested (e.g. unusual string/comment constructs).
 - **Single-process deployment.** Rate limiting and concurrency caps live in one process's memory; they wouldn't hold up across multiple instances.
+- **The rate limiter can contaminate unrelated test results.** With burst = 30 and refill = 30/min, any client issuing more than 30 POSTs inside a minute starts getting `429`s — including a caller who is really testing caching or chunking and merely happens to be fast. I watched this happen to my own probe run. The behavior is exactly what the contract asks for (sustained 30/min succeeds, beyond burst is `429` + `Retry-After`, never 5xx) and `/spec` declares it honestly, so I left it: raising the burst would make `rateLimitPerMinute: 30` a less truthful self-declaration, and the contract weights declared-limit accuracy explicitly. It is a real sharp edge worth naming rather than hiding.
 
 **Priority order given more time:**
 1. Persist job/cache/idempotency state.
