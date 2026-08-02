@@ -5,54 +5,20 @@
 const BASE = process.env.BASE ?? "http://localhost:3000";
 const TOKEN = process.env.TOKEN ?? "test-token-123";
 
-// Self-assessment weights, NOT Xsolla's actual rubric (which isn't
-// published -- "published for fairness" only names the categories, not the
-// point values). Justified from the spec's own language:
-//  - mock findings get the single largest weight: "This is what we score"
-//    is said verbatim about the mock provider.
-//  - chunking / SSE-replay / caching+idempotency are each weighted heavily
-//    per "cross-cutting behaviors -- chunk boundaries, dedup, replay,
-//    caching -- are where the points are."
-//  - auth and injection inertness get extra weight as security-critical.
-// Sums to 100.
-const WEIGHTS = {
-  1: { title: "Contract and lifecycle", points: 5 },
-  2: { title: "Auth on all /v1 routes", points: 8 },
-  3: { title: "Exact mock findings on crafted diffs", points: 15 },
-  4: { title: "Chunking correctness", points: 12 },
-  5: { title: "SSE incl. replay", points: 12 },
-  6: { title: "Caching + idempotency", points: 12 },
-  7: { title: "Error taxonomy", points: 6 },
-  8: { title: "Injection inertness", points: 8 },
-  9: { title: "Rate limiting", points: 6 },
-  10: { title: "Concurrency", points: 6 },
-  11: { title: "The 30s latency budget", points: 4 },
-  12: { title: "Spec self-declaration accuracy", points: 3 },
-  13: { title: "The llm path exists and degrades gracefully", points: 3 },
-};
-
-const results = []; // { num, title, points, pass, total }
-let current = null;
-
-function finishSection() {
-  if (current) results.push(current);
-}
+let sectionPass = 0;
+let sectionFail = 0;
 
 function ok(cond, label) {
-  if (current) current.total++;
   if (cond) {
     console.log(`  PASS  ${label}`);
-    if (current) current.pass++;
+    sectionPass++;
   } else {
     console.log(`  FAIL  ${label}`);
+    sectionFail++;
   }
 }
 
 function section(title) {
-  finishSection();
-  const num = parseInt(title, 10);
-  const meta = WEIGHTS[num] ?? { title, points: 0 };
-  current = { num, title: meta.title, points: meta.points, pass: 0, total: 0 };
   console.log("\n" + "=".repeat(72));
   console.log(title);
   console.log("=".repeat(72));
@@ -323,31 +289,9 @@ async function main() {
     ok(getDuringBurst.status !== 429, "GET requests are never rate limited, even during a POST burst");
   }
 
-  finishSection();
-
-  const totalPass = results.reduce((s, r) => s + r.pass, 0);
-  const totalChecks = results.reduce((s, r) => s + r.total, 0);
-  const maxPoints = results.reduce((s, r) => s + r.points, 0);
-  const earnedPoints = results.reduce((s, r) => s + r.points * (r.total > 0 ? r.pass / r.total : 0), 0);
-
   console.log("\n" + "=".repeat(72));
-  console.log("SELF-ASSESSMENT SCORECARD");
-  console.log("(my own weighting, NOT Xsolla's real rubric -- see comment at top of file)");
-  console.log("=".repeat(72));
-  console.log("  #  Category".padEnd(58) + "Checks".padEnd(10) + "Points");
-  console.log("-".repeat(80));
-  for (const r of results.sort((a, b) => a.num - b.num)) {
-    const label = `  ${r.num}. ${r.title}`;
-    const checks = `${r.pass}/${r.total}`;
-    const pts = `${(r.points * (r.total > 0 ? r.pass / r.total : 0)).toFixed(1)}/${r.points}`;
-    console.log(label.padEnd(58) + checks.padEnd(10) + pts);
-  }
-  console.log("-".repeat(80));
-  console.log(`  TOTAL CHECKS: ${totalPass}/${totalChecks} passed`);
-  console.log(`  ESTIMATED SCORE: ${earnedPoints.toFixed(1)} / ${maxPoints}`);
-  console.log("=".repeat(72));
-
-  if (totalPass < totalChecks) process.exit(1);
+  console.log(`TOTAL: ${sectionPass} passed, ${sectionFail} failed`);
+  if (sectionFail > 0) process.exit(1);
 }
 
 main().catch((e) => {
