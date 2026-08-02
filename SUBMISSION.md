@@ -39,9 +39,10 @@ Both providers implement one interface — `reviewChunk(files, addedLines, lineR
 **`llm`**
 - Vendor-agnostic: any OpenAI-compatible API (OpenRouter, Groq, OpenAI) works via `LLM_BASE_URL`; `LLM_VENDOR=anthropic` switches to Anthropic's native Messages API.
 - The model returns findings as a JSON array matching the `Finding` shape; the response is defensively parsed (strips markdown fences, validates each field, drops anything malformed instead of crashing).
-- `LLM_FALLBACK_MODELS` is an ordered chain (strongest first), tried in sequence if the primary fails.
-- The **whole chain shares one time budget** (`LLM_CHAIN_BUDGET_MS`, 28s) rather than a fresh timeout per model, and every call — connect, headers, **and body** — runs under one abort timer. That last part is load-bearing and I originally got it wrong; see bug 6 below.
-- Because the budget is measured from submission, `LLM_TIMEOUT_MS` (27s) is deliberately under the contract's 30s rather than equal to it: the job has to reach a terminal state within 30s, not start one.
+- `LLM_FALLBACK_MODELS` is an ordered chain, tried in sequence if the primary fails. Ordering came from measurement, not reputation: `llama-3.3-70b-versatile` was both the fastest (726ms) and among the strongest of the candidates, while `qwen3.6-27b` was dropped for emitting reasoning prose around its JSON.
+- The **whole chain shares one time budget** (`LLM_CHAIN_BUDGET_MS`, 25s) rather than a fresh timeout per model, and every call — connect, headers, **and body** — runs under one abort timer. That last part is load-bearing and I originally got it wrong; see bug 6 below.
+- A chunk's real deadline is the tighter of that chain budget and **what remains of the job's own 30s contract budget**, which is anchored to submission time. Queue wait is therefore charged against the model call rather than added on top of it; see bug 7.
+- `LLM_TIMEOUT_MS` is 8s — roughly 10x the ~0.6-1.5s a call actually takes on Groq. Deliberately not larger: at 8s the chain can attempt all four models and still finish inside the budget, whereas one 25s attempt would leave no room for a fallback.
 - If every model in the chain fails, the job resolves to `status: "failed"` with the underlying error — the process itself never crashes.
 - The prompt tells the model the diff is untrusted data, not instructions — a second layer under the mock provider's literal `MOCK-INJ` detection.
 
@@ -53,13 +54,15 @@ Two independent, assertion-based suites run against the **live deployed instance
 - **`test/proof-scoring-criteria.mjs` (50 checks):** the same ground, reorganized 1:1 against the task's own "What we score" list, plus one live `llm`-provider call.
 - **`test/demo*.mjs`:** readable (non-assertion) walkthroughs for manually eyeballing diff-in vs. findings-out, including a dedicated chunking proof that submits the same files both under and over 64KiB and diffs the resulting findings.
 
-**Five real bugs were found by running against a live process rather than by reading the code:**
+**Seven real bugs were found by running against a live process rather than by reading the code:**
 1. **The parser only stripped `a/`/`b/` path prefixes when the diff carried `diff --git` headers.** A hand-written unified diff (prefixes, no `diff --git` line) produced `MOCK-003:b/src/db.ts:41` instead of `MOCK-003:src/db.ts:41` — a wrong `path` and `id` on *every* finding. The prefix strip is now unconditional. This is the one I'd have most regretted missing: the suite only ever generated `git diff`-shaped input, so it was invisible until I deliberately fed the service other legal diff shapes.
 2. **A deletion-only diff was rejected `422 invalid_diff`.** The "did I see a hunk?" flag was only set inside the per-file body loop, which is skipped for `+++ /dev/null` targets — so a diff that only deletes files looked unparseable. It's valid input that legitimately yields zero findings.
 3. **An added line whose content began with `++`** was mistaken for a `+++` file header and dropped without advancing the line counter, shifting every subsequent line number in that file.
 4. An undersized rate-limit burst (10, raised to 30 — one full minute's sustained quota) that wrongly throttled a legitimate rapid-fire correctness-check run.
 5. A regex false positive: `=== null` / `!== null` was wrongly matching the loose-null-comparison rule.
 6. **The LLM timeout never applied to generation.** `fetchWithTimeout` cleared its abort timer as soon as `fetch()` resolved — but `fetch()` resolves when response *headers* arrive, and an LLM vendor sends headers immediately then streams tokens. The subsequent `res.json()` read the body with no timeout at all, so the "budget" only ever bounded connection latency. A 15s chain budget was observed producing a **46s** job. The body read now stays inside the timer's scope, which makes the 30s guarantee structural instead of aspirational.
+
+7. **Queue wait wasn't charged against the 30s budget.** The budget is per job and starts at submission, but the llm provider applied its own fixed timeout on top of however long the job had already waited for a worker. Measured in production under 5 concurrent submissions: `total=38608ms queued=11607ms` — over budget with no single slow call. Chunks now carry an absolute deadline derived from submission time. This is the fix I had explicitly *rejected* earlier in this file as low-probability; measurement proved it real, so I implemented it.
 
 Each has a regression check in `verify.mjs` or `timing.mjs`, and is documented in git history rather than silently changed.
 
@@ -75,20 +78,31 @@ Each has a regression check in `verify.mjs` or `timing.mjs`, and is documented i
 
 ## An AI suggestion I rejected
 
-- While demoing the `llm` provider under concurrent load, Claude found a real gap: the 25s time budget bounds a job's own AI-processing time, but not how long it sits **queued** behind other `llm`-provider jobs if several run at once — under enough simultaneous AI traffic, a job could still blow the 30s SLA purely from queue wait.
-- Claude suggested fixing it immediately: stamp each job with its queue-entry time, and subtract elapsed queue wait from its LLM budget once it starts.
-- **I rejected doing it right then** — not because the fix is wrong, but because:
-  - the realistic risk is low (a single evaluator's token won't generate sustained concurrent AI traffic), and
-  - a nontrivial change to timing-sensitive logic, redeployed minutes before a 48-hour scoring window starts, trades a low-probability future problem for a real, immediate risk of shipping a fresh bug with no time left to catch it.
-- The task explicitly invites documenting a reasoned skip over rushing a late change — so it's tracked below instead.
+- While demoing the `llm` provider under concurrent load, Claude found a real gap: the chain time budget bounds a job's own AI-processing time, but not how long it sits **queued** behind other `llm` jobs — so a job could blow the 30s budget purely from queue wait.
+- Claude suggested fixing it immediately: stamp each job with its queue-entry time and subtract elapsed queue wait from its LLM budget.
+- **I rejected doing it right then**, on two grounds: the realistic risk looked low (a single evaluator's token won't generate sustained concurrent AI traffic), and a timing-sensitive change redeployed just before a scoring window trades a low-probability problem for the immediate risk of a fresh bug.
+
+**Then I measured it, and I was wrong.** Five concurrent `llm` submissions against the deployed service produced:
+
+```
+job1: total=38608ms  queued=11607ms  status=failed    *** over the 30s budget ***
+```
+
+No single call was slow. The job simply waited 11.6s for a worker and then was handed a full-length model call on top. So I implemented the fix I'd rejected (bug 7 above), and verified it against a stub LLM that sleeps a fixed 20s — which makes the queueing exact and costs no real quota:
+
+```
+job4: total=27508ms  queued=20053ms  "timed out after 7447ms"   <- 7.4s, not a full call
+```
+
+The reasoning for the original rejection wasn't unsound — deploy risk before a scoring window is real. What was unsound was the confidence in "low probability" for something I had never measured. The honest lesson is that "unlikely" was a guess wearing the costume of a judgment call, and the measurement took ten minutes.
 
 ## What I'd do next with more time
 
-To be clear about what these are and aren't: **neither the deterministic `mock` provider nor sourcing the `llm` path from free-tier models are limitations** — the spec requires the former and explicitly says you don't need to pay for the latter. The real limitations, independent of provider choice:
+To be clear about what these are and aren't: **neither the deterministic `mock` provider nor sourcing the `llm` path from a free tier are limitations** — the spec requires the former and explicitly says you don't need to pay for the latter. The real limitations:
 
 - **In-memory-only state.** A process restart mid-window (crash, platform hiccup, redeploy) loses every job's history — no persistence.
-- **`llm` completes reliably only about half the time.** Not a code defect — OpenRouter's free tier is queue-dominated, and the same 3-line diff was measured at 19.4s, 22s (timeout), 22s (timeout) and 10.6s. Model size is irrelevant to this: a 20B model and a 550B model both sit in the same queue. Every outcome is inside the 30s budget and fails gracefully, so the contract's bar ("exists and degrades gracefully") is met — but "works end to end" is a coin flip. The fix is a vendor with dedicated inference capacity (Groq, Cerebras), which is an env-var change only since the client is already OpenAI-compatible.
-- **`llm` queue-wait time isn't bounded** — measured at 4.5s with 5 concurrent jobs, worst job still finishing at 14.4s, so it holds in practice. It stays a latent risk: if per-call latency rose to ~27s, a queued 5th job would land near 54s.
+- **The `llm` fallback chain is single-vendor.** `LLM_BASE_URL` is global, so every model in the chain must live behind one API. That covers a *model* being unavailable but not a *vendor* outage. Making each chain entry carry its own base URL and key is the obvious next step.
+- **Vendor choice turned out to matter more than any code I wrote.** On OpenRouter's free tier the same 3-line diff measured 19.4s, 22s (timeout), 22s (timeout), 10.6s — a coin flip, because free shared capacity is queue-dominated and model size is irrelevant to it. Moving to Groq's dedicated inference took the same work to ~0.6s, a 25-40x improvement, with no code change at all. I had been tuning timeouts against a constraint that was never in my code.
 - **Regex/brace-depth heuristics for MOCK-003/004, not a real parser.** A sufficiently adversarial diff could still evade or misfire in edge cases beyond what's been tested (e.g. unusual string/comment constructs).
 - **Single-process deployment.** Rate limiting and concurrency caps live in one process's memory; they wouldn't hold up across multiple instances.
 - **The rate limiter can contaminate unrelated test results.** With burst = 30 and refill = 30/min, any client issuing more than 30 POSTs inside a minute starts getting `429`s — including a caller who is really testing caching or chunking and merely happens to be fast. I watched this happen to my own probe run. The behavior is exactly what the contract asks for (sustained 30/min succeeds, beyond burst is `429` + `Retry-After`, never 5xx) and `/spec` declares it honestly, so I left it: raising the burst would make `rateLimitPerMinute: 30` a less truthful self-declaration, and the contract weights declared-limit accuracy explicitly. It is a real sharp edge worth naming rather than hiding.

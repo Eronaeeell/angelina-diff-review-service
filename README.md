@@ -58,7 +58,7 @@ npm run dev             # or: npm run build && npm start
 | | `mock` | `llm` |
 |---|---|---|
 | **What it is** | Regex/line-based rule engine, 9 fixed rules (`MOCK-001`..`008`, `MOCK-INJ`) | Real AI model call, any OpenAI-compatible vendor or Anthropic |
-| **Speed** | Instant (~10ms) | Real API call, 9-22s on a free tier; capped at 27s |
+| **Speed** | Instant (~10ms) | Real API call, ~0.6-1.5s on Groq; capped at 8s per model |
 | **Determinism** | 100% — same input, same output, always | Varies run to run — real AI judgment |
 | **Failure mode** | Never fails | Falls back through an ordered model chain; if every model fails, job → `status: "failed"` with a clear error, process never crashes |
 | **Why this design** | This is what's scored — proves the pipeline works independent of any model | Only needs to exist and degrade gracefully, per the task contract |
@@ -86,8 +86,8 @@ Run any of them the same way shown above (`BASE`/`TOKEN` env vars). Running thes
 | `LLM_API_KEY` | for `llm` provider | Vendor API key |
 | `LLM_MODEL` | for `llm` provider | Primary (strongest) model id |
 | `LLM_FALLBACK_MODELS` | no | Comma-separated fallback chain, strongest first |
-| `LLM_BASE_URL` | no | API base override (e.g. `https://openrouter.ai/api/v1`) |
-| `LLM_TIMEOUT_MS` | no (27000) | Per-model-call ceiling, covering connect + headers + body |
+| `LLM_BASE_URL` | no | API base override. This deployment uses `https://api.groq.com/openai/v1`; any OpenAI-compatible vendor works |
+| `LLM_TIMEOUT_MS` | no (27000) | Per-model-call ceiling, covering connect + headers + body. Set to 8000 in this deployment, so the chain can reach its fallbacks inside the budget |
 | `LLM_CHAIN_BUDGET_MS` | no (28000) | Shared budget across the whole chain. Under 30s, not equal to it: the budget is measured from submission, so the job must *finish* inside 30s |
 | `STORE_TTL_MS` | no (24h) | Age at which in-memory jobs/cache/idempotency entries are evicted |
 | `STORE_SWEEP_INTERVAL_MS` | no (15min) | Eviction sweep frequency |

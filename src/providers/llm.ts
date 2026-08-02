@@ -129,6 +129,16 @@ function extractJsonArray(text: string): unknown[] {
   return parsed;
 }
 
+/**
+ * The model reads paths straight out of the diff header, so it reports
+ * `b/src/db.ts` where the mock provider (which parses the diff properly)
+ * reports `src/db.ts`. Normalising here keeps `path` meaning the same thing
+ * whichever provider produced the finding.
+ */
+function normalizePath(p: string): string {
+  return p.startsWith("a/") || p.startsWith("b/") ? p.slice(2) : p;
+}
+
 function coerceFinding(raw: any): Finding | null {
   if (!raw || typeof raw !== "object") return null;
   const { ruleId, path, line, severity, category, title, evidence } = raw;
@@ -137,10 +147,11 @@ function coerceFinding(raw: any): Finding | null {
   if (!Number.isFinite(lineNum)) return null;
   const sev: Severity = VALID_SEVERITIES.includes(severity) ? severity : "low";
   const cat: Category = VALID_CATEGORIES.includes(category) ? category : "style";
+  const cleanPath = normalizePath(path);
   return {
-    id: `${ruleId}:${path}:${lineNum}`,
+    id: `${ruleId}:${cleanPath}:${lineNum}`,
     ruleId,
-    path,
+    path: cleanPath,
     line: lineNum,
     severity: sev,
     category: cat,
