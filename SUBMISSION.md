@@ -40,7 +40,8 @@ Both providers implement one interface — `reviewChunk(files, addedLines, lineR
 - Vendor-agnostic: any OpenAI-compatible API (OpenRouter, Groq, OpenAI) works via `LLM_BASE_URL`; `LLM_VENDOR=anthropic` switches to Anthropic's native Messages API.
 - The model returns findings as a JSON array matching the `Finding` shape; the response is defensively parsed (strips markdown fences, validates each field, drops anything malformed instead of crashing).
 - `LLM_FALLBACK_MODELS` is an ordered chain (strongest first), tried in sequence if the primary fails.
-- The **whole chain shares one time budget** (`LLM_CHAIN_BUDGET_MS`) instead of a full timeout per model, so cascading timeouts can't blow the 30s single-chunk SLA.
+- The **whole chain shares one time budget** (`LLM_CHAIN_BUDGET_MS`, 28s) rather than a fresh timeout per model, and every call — connect, headers, **and body** — runs under one abort timer. That last part is load-bearing and I originally got it wrong; see bug 6 below.
+- Because the budget is measured from submission, `LLM_TIMEOUT_MS` (27s) is deliberately under the contract's 30s rather than equal to it: the job has to reach a terminal state within 30s, not start one.
 - If every model in the chain fails, the job resolves to `status: "failed"` with the underlying error — the process itself never crashes.
 - The prompt tells the model the diff is untrusted data, not instructions — a second layer under the mock provider's literal `MOCK-INJ` detection.
 
@@ -58,8 +59,11 @@ Two independent, assertion-based suites run against the **live deployed instance
 3. **An added line whose content began with `++`** was mistaken for a `+++` file header and dropped without advancing the line counter, shifting every subsequent line number in that file.
 4. An undersized rate-limit burst (10, raised to 30 — one full minute's sustained quota) that wrongly throttled a legitimate rapid-fire correctness-check run.
 5. A regex false positive: `=== null` / `!== null` was wrongly matching the loose-null-comparison rule.
+6. **The LLM timeout never applied to generation.** `fetchWithTimeout` cleared its abort timer as soon as `fetch()` resolved — but `fetch()` resolves when response *headers* arrive, and an LLM vendor sends headers immediately then streams tokens. The subsequent `res.json()` read the body with no timeout at all, so the "budget" only ever bounded connection latency. A 15s chain budget was observed producing a **46s** job. The body read now stays inside the timer's scope, which makes the 30s guarantee structural instead of aspirational.
 
-Each has a regression check in `verify.mjs` and is documented in git history rather than silently changed.
+Each has a regression check in `verify.mjs` or `timing.mjs`, and is documented in git history rather than silently changed.
+
+**Bug 6 is the one I'd most want to talk through.** It was invisible to every test that existed, because all of them asked *"did the llm path return findings?"* and none asked *"how long did it take?"* The suite was green while the service could take three times its stated budget. That gap is why `test/timing.mjs` exists now: it measures every job shape against the 30s budget from submission, reports queue wait separately from run time, and exits non-zero if anything is over — so the budget is a gate, not a hope.
 
 **A note on how #1–#3 were found, since it's the more useful lesson:** all three are parser bugs, and all three were invisible to a 50-check suite that was *green*. The suite's diff fixtures were all built by one helper that emitted `git diff` output, so the tests agreed with the implementation about what a diff looks like. Nothing was found until I stopped asking "do my tests pass?" and started asking "what legal input have I never fed this?" — non-git diffs, `diff -u` output, deletion-only diffs, added lines that mimic diff syntax.
 
@@ -83,7 +87,8 @@ Each has a regression check in `verify.mjs` and is documented in git history rat
 To be clear about what these are and aren't: **neither the deterministic `mock` provider nor sourcing the `llm` path from free-tier models are limitations** — the spec requires the former and explicitly says you don't need to pay for the latter. The real limitations, independent of provider choice:
 
 - **In-memory-only state.** A process restart mid-window (crash, platform hiccup, redeploy) loses every job's history — no persistence.
-- **The `llm` provider's queue-wait time isn't bounded** (see above) — only its own per-job processing time is.
+- **`llm` completes reliably only about half the time.** Not a code defect — OpenRouter's free tier is queue-dominated, and the same 3-line diff was measured at 19.4s, 22s (timeout), 22s (timeout) and 10.6s. Model size is irrelevant to this: a 20B model and a 550B model both sit in the same queue. Every outcome is inside the 30s budget and fails gracefully, so the contract's bar ("exists and degrades gracefully") is met — but "works end to end" is a coin flip. The fix is a vendor with dedicated inference capacity (Groq, Cerebras), which is an env-var change only since the client is already OpenAI-compatible.
+- **`llm` queue-wait time isn't bounded** — measured at 4.5s with 5 concurrent jobs, worst job still finishing at 14.4s, so it holds in practice. It stays a latent risk: if per-call latency rose to ~27s, a queued 5th job would land near 54s.
 - **Regex/brace-depth heuristics for MOCK-003/004, not a real parser.** A sufficiently adversarial diff could still evade or misfire in edge cases beyond what's been tested (e.g. unusual string/comment constructs).
 - **Single-process deployment.** Rate limiting and concurrency caps live in one process's memory; they wouldn't hold up across multiple instances.
 - **The rate limiter can contaminate unrelated test results.** With burst = 30 and refill = 30/min, any client issuing more than 30 POSTs inside a minute starts getting `429`s — including a caller who is really testing caching or chunking and merely happens to be fast. I watched this happen to my own probe run. The behavior is exactly what the contract asks for (sustained 30/min succeeds, beyond burst is `429` + `Retry-After`, never 5xx) and `/spec` declares it honestly, so I left it: raising the burst would make `rateLimitPerMinute: 30` a less truthful self-declaration, and the contract weights declared-limit accuracy explicitly. It is a real sharp edge worth naming rather than hiding.

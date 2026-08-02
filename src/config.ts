@@ -37,11 +37,11 @@ export const config = {
     // Per-model call timeout, used as an upper bound -- the whole fallback
     // chain is additionally capped by chainBudgetMs so cascading timeouts
     // across several models can't blow the 30s single-chunk SLA.
-    timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 20000),
+    timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 27000),
     // Total time budget for walking the whole model chain (primary + all
     // fallbacks) on a single chunk. Left with ~5s of headroom under the
     // contract's 30s "done within 30s for <=64KiB diffs" budget.
-    chainBudgetMs: Number(process.env.LLM_CHAIN_BUDGET_MS ?? 25000),
+    chainBudgetMs: Number(process.env.LLM_CHAIN_BUDGET_MS ?? 28000),
     // Optional OpenRouter-recommended attribution headers.
     httpReferer: process.env.LLM_HTTP_REFERER ?? "",
     appTitle: process.env.LLM_APP_TITLE ?? "",

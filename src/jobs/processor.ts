@@ -29,8 +29,27 @@ function comparePath(a: DiffFileBlock, b: DiffFileBlock): number {
   return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 }
 
+/**
+ * Wall-clock breakdown for one job, all measured from `createdAt` -- the
+ * moment of submission, which is when the contract's 30s budget starts.
+ * `queuedMs` is the part spent waiting for a worker slot: it is invisible
+ * to any per-call timeout, so a job can blow the budget without a single
+ * slow provider call.
+ */
+export function timingsFor(job: Job): { queuedMs: number; runningMs: number; totalMs: number } {
+  const now = Date.now();
+  const started = job.startedAt ?? now;
+  const finished = job.finishedAt ?? now;
+  return {
+    queuedMs: started - job.createdAt,
+    runningMs: Math.max(0, finished - started),
+    totalMs: finished - job.createdAt,
+  };
+}
+
 export async function processJob(job: Job): Promise<void> {
   job.status = "running";
+  job.startedAt = Date.now();
   emitEvent(job, { event: "status", data: { status: "running" } });
 
   try {
@@ -86,12 +105,17 @@ export async function processJob(job: Job): Promise<void> {
     job.findings = ordered.slice(0, job.options.maxFindings);
 
     job.status = "done";
-    emitEvent(job, { event: "status", data: { status: "done" } });
+    job.finishedAt = Date.now();
+    // `timings` rides on the status event, not the `done` event: the contract
+    // pins `done` to exactly {total, usage}, so extra keys go where the shape
+    // is ours to choose.
+    emitEvent(job, { event: "status", data: { status: "done", timings: timingsFor(job) } });
     emitEvent(job, { event: "done", data: { total: job.findings.length, usage: job.usage } });
   } catch (err: any) {
     job.status = "failed";
+    job.finishedAt = Date.now();
     job.error = { code: "internal", message: err?.message ?? "Unknown processing error" };
-    emitEvent(job, { event: "status", data: { status: "failed", error: job.error } });
+    emitEvent(job, { event: "status", data: { status: "failed", error: job.error, timings: timingsFor(job) } });
     emitEvent(job, { event: "done", data: { total: 0, usage: job.usage } });
   }
 }

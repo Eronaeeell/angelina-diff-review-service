@@ -46,7 +46,12 @@ export interface Job {
   usage: Usage;
   error?: JobError;
   events: StreamEvent[];
+  /** Submission time -- the moment the 30s budget starts counting. */
   createdAt: number;
+  /** When a worker picked the job up. The gap from createdAt is queue wait. */
+  startedAt?: number;
+  /** When the job reached a terminal state (done or failed). */
+  finishedAt?: number;
   contentHash: string;
   waiters: Array<(ev: StreamEvent) => void>;
 }

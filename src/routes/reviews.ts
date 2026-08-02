@@ -3,7 +3,7 @@ import { config } from "../config";
 import { Errors, errorEnvelope } from "../errors";
 import { rateLimitMiddleware } from "../middleware/rateLimit";
 import { parseUnifiedDiff } from "../diff/parser";
-import { processJob } from "../jobs/processor";
+import { processJob, timingsFor } from "../jobs/processor";
 import { jobQueue } from "../jobs/queue";
 import {
   bodyHash,
@@ -87,10 +87,15 @@ router.post("/v1/reviews", rateLimitMiddleware, (req: Request, res: Response, ne
       job.findings = cached.findings;
       job.usage = { ...cached.usage, cacheHit: true };
       job.status = "done";
+      // A cache hit never reaches processJob, so stamp the same clocks here --
+      // otherwise the fastest path on the service would be the one with no
+      // timings at all.
+      job.startedAt = Date.now();
+      job.finishedAt = job.startedAt;
       for (const finding of job.findings) {
         emitEvent(job, { event: "finding", data: finding });
       }
-      emitEvent(job, { event: "status", data: { status: "done" } });
+      emitEvent(job, { event: "status", data: { status: "done", timings: timingsFor(job) } });
       emitEvent(job, { event: "done", data: { total: job.findings.length, usage: job.usage } });
       if (idemKey) setIdempotencyEntry(idemKey, hash, jobId);
       res.status(202).json({ jobId, status: "queued" });
@@ -128,6 +133,10 @@ router.get("/v1/reviews/:jobId", (req: Request, res: Response) => {
     jobId: job.jobId,
     status: job.status,
     usage: job.usage,
+    // Additive to the contract's response shape (which pins jobId/status/
+    // findings/usage). Reports the 30s budget against the clock that
+    // actually matters -- submission to terminal state, queue wait included.
+    timings: timingsFor(job),
   };
   if (job.status === "done") response.findings = job.findings;
   if (job.status === "failed" && job.error) response.error = job.error;

@@ -17,21 +17,46 @@ function buildPrompt(diffChunk: string): string {
   );
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+interface TimedResponse {
+  ok: boolean;
+  status: number;
+  text: string;
+}
+
+/**
+ * Runs the *entire* exchange -- connect, headers, and body -- under a single
+ * abort timer.
+ *
+ * Clearing the timer as soon as `fetch()` resolves is the obvious-looking
+ * version and it is wrong: `fetch()` resolves when response *headers* arrive,
+ * and an LLM vendor sends headers immediately and then streams tokens for as
+ * long as generation takes. Reading the body after the timer is cleared
+ * leaves generation time completely unbounded -- which is how a 15s chain
+ * budget was observed producing a 46s job. The body read must stay inside
+ * the timer's scope.
+ */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<TimedResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    const text = await res.text();
+    return { ok: res.ok, status: res.status, text };
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      throw new Error(`timed out after ${timeoutMs}ms`);
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function safeText(res: Response): Promise<string> {
+function parseVendorJson(res: TimedResponse, model: string): any {
   try {
-    return (await res.text()).slice(0, 500);
+    return JSON.parse(res.text);
   } catch {
-    return "<no body>";
+    throw new Error(`LLM response was not valid JSON (model "${model}"): ${res.text.slice(0, 200)}`);
   }
 }
 
@@ -57,8 +82,8 @@ async function callOpenAiCompatible(prompt: string, model: string, timeoutMs: nu
     },
     timeoutMs
   );
-  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${await safeText(res)}`);
-  const data: any = await res.json();
+  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${res.text.slice(0, 500)}`);
+  const data = parseVendorJson(res, model);
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error(`LLM response missing message content (model "${model}")`);
   return content;
@@ -83,8 +108,8 @@ async function callAnthropic(prompt: string, model: string, timeoutMs: number): 
     },
     timeoutMs
   );
-  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${await safeText(res)}`);
-  const data: any = await res.json();
+  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${res.text.slice(0, 500)}`);
+  const data = parseVendorJson(res, model);
   const content = data?.content?.[0]?.text;
   if (typeof content !== "string") throw new Error(`LLM response missing content block (model "${model}")`);
   return content;
