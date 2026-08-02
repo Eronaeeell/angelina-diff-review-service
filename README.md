@@ -31,11 +31,24 @@ npm run build && npm start
 | `LLM_MODEL` | only for `llm` provider | Primary (strongest) model id |
 | `LLM_FALLBACK_MODELS` | no | Comma-separated ordered fallback chain, strongest first; tried in order if the primary fails, before the job is marked `failed` |
 | `LLM_BASE_URL` | no | Override API base (e.g. `https://openrouter.ai/api/v1`) |
-| `LLM_TIMEOUT_MS` | no (default 20000) | Per-call timeout |
+| `LLM_TIMEOUT_MS` | no (default 20000) | Per-model-call timeout ceiling |
+| `LLM_CHAIN_BUDGET_MS` | no (default 25000) | Shared time budget for the whole primary+fallback chain on one chunk, so cascading timeouts can't blow the 30s single-chunk SLA |
 | `LLM_HTTP_REFERER`, `LLM_APP_TITLE` | no | Optional OpenRouter attribution headers |
+| `STORE_TTL_MS` | no (default 24h) | Age at which in-memory jobs/cache/idempotency entries are evicted |
+| `STORE_SWEEP_INTERVAL_MS` | no (default 15min) | How often the eviction sweep runs |
 
 If `llm` is requested and the model is unreachable/misconfigured, the job
 resolves to `status: "failed"` with a clear error — the process never crashes.
+
+## Rate limiting
+
+`POST /v1/reviews` is limited with a token-bucket, keyed per bearer token:
+capacity (burst) of 30 requests, refilling at 30/minute (matches the
+declared `rateLimitPerMinute`). A sustained 30 req/min always succeeds; a
+burst above 30 in-flight gets `429` + `Retry-After` until tokens refill.
+GETs are never rate limited. Burst size intentionally equals a full minute's
+quota so a rapid-fire correctness-check suite (e.g. one request per mock
+rule, back to back) isn't wrongly throttled -- see SUBMISSION.md.
 
 ## Project layout
 
@@ -56,7 +69,7 @@ src/
   middleware/                auth, rate limit, error handler
 test/
   fixtures/                 sample diffs
-  smoke*.mjs                 end-to-end verification scripts (see SUBMISSION.md)
+  verify.mjs                 end-to-end contract verification suite (see SUBMISSION.md)
 ```
 
 ## Deployment

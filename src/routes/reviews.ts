@@ -49,13 +49,24 @@ router.post("/v1/reviews", rateLimitMiddleware, (req: Request, res: Response, ne
       throw Errors.invalidDiff("diff is missing or empty");
     }
 
-    const rawOptions = ((body as any).options ?? {}) as Record<string, unknown>;
-    const provider: ProviderName = rawOptions.provider === "llm" ? "llm" : "mock";
+    const optionsRaw = (body as any).options;
+    if (optionsRaw !== undefined && (typeof optionsRaw !== "object" || optionsRaw === null || Array.isArray(optionsRaw))) {
+      throw Errors.invalidDiff("options must be a JSON object");
+    }
+    const rawOptions = (optionsRaw ?? {}) as Record<string, unknown>;
+
+    let provider: ProviderName = "mock";
+    if (rawOptions.provider !== undefined) {
+      if (rawOptions.provider !== "mock" && rawOptions.provider !== "llm") {
+        throw Errors.invalidDiff('options.provider must be "mock" or "llm"');
+      }
+      provider = rawOptions.provider;
+    }
 
     let maxFindings = config.defaultMaxFindings;
     if (rawOptions.maxFindings !== undefined) {
-      const n = Number(rawOptions.maxFindings);
-      if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+      const n = rawOptions.maxFindings;
+      if (typeof n !== "number" || !Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
         throw Errors.invalidDiff("options.maxFindings must be a non-negative integer");
       }
       maxFindings = n;
@@ -76,6 +87,9 @@ router.post("/v1/reviews", rateLimitMiddleware, (req: Request, res: Response, ne
       job.findings = cached.findings;
       job.usage = { ...cached.usage, cacheHit: true };
       job.status = "done";
+      for (const finding of job.findings) {
+        emitEvent(job, { event: "finding", data: finding });
+      }
       emitEvent(job, { event: "status", data: { status: "done" } });
       emitEvent(job, { event: "done", data: { total: job.findings.length, usage: job.usage } });
       if (idemKey) setIdempotencyEntry(idemKey, hash, jobId);

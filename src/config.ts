@@ -15,6 +15,13 @@ export const config = {
 
   defaultMaxFindings: 100,
 
+  // In-memory job/cache/idempotency entries older than this are swept
+  // periodically so a long-lived process doesn't grow unbounded. Default is
+  // generous (well beyond the 48h scoring window) since evicting something
+  // still needed mid-window would be worse than the memory it saves.
+  storeTtlMs: Number(process.env.STORE_TTL_MS ?? 24 * 60 * 60 * 1000),
+  storeSweepIntervalMs: Number(process.env.STORE_SWEEP_INTERVAL_MS ?? 15 * 60 * 1000),
+
   // LLM provider (env-configured; see README)
   llm: {
     vendor: process.env.LLM_VENDOR ?? "", // "anthropic" or anything OpenAI-compatible (openai, groq, openrouter, ...)
@@ -27,7 +34,14 @@ export const config = {
       .map((m) => m.trim())
       .filter(Boolean),
     baseUrl: process.env.LLM_BASE_URL ?? "", // e.g. https://openrouter.ai/api/v1
+    // Per-model call timeout, used as an upper bound -- the whole fallback
+    // chain is additionally capped by chainBudgetMs so cascading timeouts
+    // across several models can't blow the 30s single-chunk SLA.
     timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 20000),
+    // Total time budget for walking the whole model chain (primary + all
+    // fallbacks) on a single chunk. Left with ~5s of headroom under the
+    // contract's 30s "done within 30s for <=64KiB diffs" budget.
+    chainBudgetMs: Number(process.env.LLM_CHAIN_BUDGET_MS ?? 25000),
     // Optional OpenRouter-recommended attribution headers.
     httpReferer: process.env.LLM_HTTP_REFERER ?? "",
     appTitle: process.env.LLM_APP_TITLE ?? "",

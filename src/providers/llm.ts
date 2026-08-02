@@ -35,7 +35,7 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
-async function callOpenAiCompatible(prompt: string, model: string): Promise<string> {
+async function callOpenAiCompatible(prompt: string, model: string, timeoutMs: number): Promise<string> {
   const baseUrl = config.llm.baseUrl || "https://api.openai.com/v1";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -55,7 +55,7 @@ async function callOpenAiCompatible(prompt: string, model: string): Promise<stri
         temperature: 0,
       }),
     },
-    config.llm.timeoutMs
+    timeoutMs
   );
   if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${await safeText(res)}`);
   const data: any = await res.json();
@@ -64,7 +64,7 @@ async function callOpenAiCompatible(prompt: string, model: string): Promise<stri
   return content;
 }
 
-async function callAnthropic(prompt: string, model: string): Promise<string> {
+async function callAnthropic(prompt: string, model: string, timeoutMs: number): Promise<string> {
   const baseUrl = config.llm.baseUrl || "https://api.anthropic.com/v1";
   const res = await fetchWithTimeout(
     `${baseUrl}/messages`,
@@ -81,7 +81,7 @@ async function callAnthropic(prompt: string, model: string): Promise<string> {
         messages: [{ role: "user", content: prompt }],
       }),
     },
-    config.llm.timeoutMs
+    timeoutMs
   );
   if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${await safeText(res)}`);
   const data: any = await res.json();
@@ -124,8 +124,10 @@ function coerceFinding(raw: any): Finding | null {
   };
 }
 
-async function callModel(prompt: string, model: string): Promise<string> {
-  return config.llm.vendor === "anthropic" ? callAnthropic(prompt, model) : callOpenAiCompatible(prompt, model);
+async function callModel(prompt: string, model: string, timeoutMs: number): Promise<string> {
+  return config.llm.vendor === "anthropic"
+    ? callAnthropic(prompt, model, timeoutMs)
+    : callOpenAiCompatible(prompt, model, timeoutMs);
 }
 
 export const llmProvider: Provider = {
@@ -141,14 +143,26 @@ export const llmProvider: Provider = {
     const prompt = buildPrompt(diffText);
 
     // Try the primary (strongest) model first, then walk the fallback chain
-    // in order until one succeeds. The job only fails if every model does.
+    // in order until one succeeds. The whole chain shares one time budget
+    // (config.llm.chainBudgetMs) so cascading timeouts across several
+    // models can't blow the 30s single-chunk SLA -- each call gets at most
+    // the smaller of the configured per-model timeout and whatever's left
+    // of the shared budget, and we stop trying once that's exhausted.
     const chain = [config.llm.model, ...config.llm.fallbackModels];
     const errors: string[] = [];
     let raw: string | null = null;
+    const deadline = Date.now() + config.llm.chainBudgetMs;
+    const MIN_USEFUL_TIMEOUT_MS = 3000;
 
     for (const model of chain) {
+      const remaining = deadline - Date.now();
+      if (remaining < MIN_USEFUL_TIMEOUT_MS) {
+        errors.push(`${model}: skipped, chain time budget exhausted`);
+        break;
+      }
+      const callTimeout = Math.min(config.llm.timeoutMs, remaining);
       try {
-        raw = await callModel(prompt, model);
+        raw = await callModel(prompt, model, callTimeout);
         break;
       } catch (err: any) {
         errors.push(`${model}: ${err?.message ?? err}`);
