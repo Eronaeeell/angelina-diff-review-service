@@ -91,30 +91,45 @@ not from reading the code.
 
 ## An AI suggestion I rejected
 
-The first draft of the empty-catch rule (MOCK-004) matched only added lines
-in a simple two-line lookahead window. That would have missed a catch block
-whose closing brace is an unchanged context line, and would have
-misattributed depth when a line reads `} catch (e) {` (closing the `try`
-and opening the `catch` on the same line). I rejected the shortcut in favor
-of proper brace-depth tracking starting from the position right after
-`catch(...) {` specifically, walking forward through added-or-context lines
-until depth returns to zero -- more code, but it's the only version that
-doesn't misfire on realistic diffs.
+While demoing the `llm` provider under concurrent load, Claude found a real
+gap: the 25s time budget bounds a job's own AI-processing time, but not how
+long it sits *queued* behind other `llm`-provider jobs if several run at
+once -- under enough simultaneous AI traffic, a job could still blow the 30s
+SLA purely from queue wait. Claude suggested fixing it immediately: stamp
+each job with its queue-entry time, and subtract elapsed queue wait from its
+LLM budget once it starts.
+
+I rejected doing it right then, for reasons that have nothing to do with the
+fix's merit: the realistic risk is low (a single evaluator's token won't
+generate sustained concurrent AI traffic), and a nontrivial code change to
+timing-sensitive logic, made and redeployed minutes before a 48-hour scoring
+window starts, trades a low-probability future problem for a real, immediate
+risk of shipping a fresh bug with no time left to catch it. The task
+explicitly invites documenting a reasoned skip over rushing a late change --
+so it's tracked below instead.
 
 ## What I'd do next with more time
 
-- Persist job/cache/idempotency state (currently in-memory with TTL eviction
-  only) so a process restart mid-window doesn't lose in-flight jobs.
-- Bound the `llm` provider's *queue* wait time, not just its own processing
-  time -- under heavy simultaneous `llm`-provider traffic, a job could still
-  wait long enough behind other slow AI calls to risk the 30s SLA, even
-  though each individual job's own model-call time is correctly capped.
-  Found this empirically while demoing the `llm` path under self-inflicted
-  concurrent load; low real-world risk for a single evaluator token, but a
-  real gap under sustained concurrent AI traffic.
-- A real parser (e.g. a lightweight JS/TS AST pass) instead of regex/brace
-  heuristics for MOCK-003/004, to remove the remaining edge cases a
-  determined adversarial diff could exploit.
+To be clear about what these are and aren't: neither the deterministic
+`mock` provider nor sourcing the `llm` path from free-tier models are
+limitations -- the spec requires the former and explicitly says you don't
+need to pay for the latter. The real limitations, independent of provider
+choice:
+
+- **In-memory-only state.** A process restart mid-window (crash, platform
+  hiccup, redeploy) loses every job's history -- no persistence.
+- **The `llm` provider's queue-wait time isn't bounded** (see above) --
+  only its own per-job processing time is.
+- **Regex/brace-depth heuristics for MOCK-003/004, not a real parser.** A
+  sufficiently adversarial diff could still evade or misfire in edge cases
+  beyond what's been tested (e.g. unusual string/comment constructs).
+- **Single-process deployment.** Rate limiting and concurrency caps live in
+  one process's memory; they wouldn't hold up across multiple instances.
+
+Given more time, in priority order: persist job/cache/idempotency state,
+bound `llm` queue-wait time, replace the MOCK-003/004 heuristics with a
+lightweight real parser, and move rate-limit/concurrency state to something
+shared (e.g. Redis) so the service could scale horizontally.
 
 ## Stack
 
