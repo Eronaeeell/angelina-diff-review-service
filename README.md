@@ -69,7 +69,7 @@ Two independent live test suites run against the deployed service (no code execu
 
 | Suite | Checks | Covers |
 |---|---|---|
-| `test/verify.mjs` | 49 | Every rule, ordering/dedup, error codes, idempotency, caching, chunking, SSE replay, concurrency, rate limits |
+| `test/verify.mjs` | 50 | Every rule, ordering/dedup, error codes, idempotency, caching, chunking, SSE replay, concurrency, rate limits, unknown-field tolerance |
 | `test/proof-scoring-criteria.mjs` | 50 | Same ground, organized 1:1 against the task's own scoring categories, plus a live `llm` call |
 | `test/demo*.mjs` | — | Human-readable diff-in/findings-out walkthroughs (no assertions, just readable output) |
 
@@ -111,7 +111,7 @@ src/
   routes/                   health, spec, reviews, stream (SSE)
   middleware/                auth, rate limit, error handler
 test/
-  verify.mjs                 49-check regression suite
+  verify.mjs                 50-check regression suite
   proof-scoring-criteria.mjs  50-check suite mapped to the scoring rubric
   demo*.mjs                   readable walkthroughs (mock, llm, chunking)
 ```

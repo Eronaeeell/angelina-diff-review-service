@@ -197,6 +197,13 @@ async function main() {
     ok(r7.status === 422, "options.maxFindings as a string -> 422 (must be a JSON number)");
     const r8 = await post({ diff: diffFor(["console.log(1);"]), options: { maxFindings: true } });
     ok(r8.status === 422, "options.maxFindings as a boolean -> 422");
+
+    const r9 = await post({
+      diff: diffFor(["console.log(1);"]),
+      unknownTopLevelField: "should be ignored, not rejected",
+      options: { provider: "mock", maxFindings: 5, unknownOptionField: 12345 },
+    });
+    ok(r9.status === 202, "unknown top-level and options fields are ignored, not rejected");
   }
 
   // ---- idempotency ----
