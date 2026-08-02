@@ -1,5 +1,7 @@
 # AI Diff Review Service
 
+**Angelina Leanore** · angelleanore@gmail.com · [LinkedIn](https://www.linkedin.com/in/angelina-leanore/)
+
 Async HTTP service that reviews unified diffs and returns structured findings, via a **deterministic rule engine** or a **real AI model** behind the same pipeline.
 
 > Full architecture writeup, verification methodology, and AI-tool usage notes live in **[`SUBMISSION.md`](./SUBMISSION.md)**. This file is the quick-reference version.

@@ -1,5 +1,7 @@
 # Submission
 
+**Angelina Leanore** · angelleanore@gmail.com · [LinkedIn](https://www.linkedin.com/in/angelina-leanore/)
+
 ## Architecture
 
 ```mermaid
