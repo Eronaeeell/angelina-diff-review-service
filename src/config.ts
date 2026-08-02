@@ -53,6 +53,20 @@ export const config = {
     // Optional OpenRouter-recommended attribution headers.
     httpReferer: process.env.LLM_HTTP_REFERER ?? "",
     appTitle: process.env.LLM_APP_TITLE ?? "",
+
+    // Optional second vendor, tried only after the primary vendor's entire
+    // chain (model + fallbackModels) has failed. Exists so an outage or
+    // quota exhaustion on the primary vendor doesn't fail the job outright
+    // when a completely independent vendor is available -- the primary
+    // chain above can only fall back across *models*, not across vendors,
+    // since they all share one baseUrl/apiKey. Inactive unless both
+    // fallbackVendor.apiKey and fallbackVendor.model are set.
+    fallbackVendor: {
+      vendor: process.env.LLM_FALLBACK_VENDOR ?? "",
+      apiKey: process.env.LLM_FALLBACK_API_KEY ?? "",
+      model: process.env.LLM_FALLBACK_MODEL ?? "",
+      baseUrl: process.env.LLM_FALLBACK_BASE_URL ?? "",
+    },
   },
 };
 

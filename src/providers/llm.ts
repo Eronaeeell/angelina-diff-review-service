@@ -60,11 +60,11 @@ function parseVendorJson(res: TimedResponse, model: string): any {
   }
 }
 
-async function callOpenAiCompatible(prompt: string, model: string, timeoutMs: number): Promise<string> {
-  const baseUrl = config.llm.baseUrl || "https://api.openai.com/v1";
+async function callOpenAiCompatible(prompt: string, call: VendorCall, timeoutMs: number): Promise<string> {
+  const baseUrl = call.baseUrl || "https://api.openai.com/v1";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${config.llm.apiKey}`,
+    Authorization: `Bearer ${call.apiKey}`,
   };
   if (config.llm.httpReferer) headers["HTTP-Referer"] = config.llm.httpReferer;
   if (config.llm.appTitle) headers["X-Title"] = config.llm.appTitle;
@@ -75,43 +75,45 @@ async function callOpenAiCompatible(prompt: string, model: string, timeoutMs: nu
       method: "POST",
       headers,
       body: JSON.stringify({
-        model,
+        model: call.model,
         messages: [{ role: "user", content: prompt }],
         temperature: 0,
       }),
     },
     timeoutMs
   );
-  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${res.text.slice(0, 500)}`);
-  const data = parseVendorJson(res, model);
+  if (!res.ok)
+    throw new Error(`LLM vendor returned ${res.status} for model "${call.model}": ${res.text.slice(0, 500)}`);
+  const data = parseVendorJson(res, call.model);
   const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error(`LLM response missing message content (model "${model}")`);
+  if (typeof content !== "string") throw new Error(`LLM response missing message content (model "${call.model}")`);
   return content;
 }
 
-async function callAnthropic(prompt: string, model: string, timeoutMs: number): Promise<string> {
-  const baseUrl = config.llm.baseUrl || "https://api.anthropic.com/v1";
+async function callAnthropic(prompt: string, call: VendorCall, timeoutMs: number): Promise<string> {
+  const baseUrl = call.baseUrl || "https://api.anthropic.com/v1";
   const res = await fetchWithTimeout(
     `${baseUrl}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": config.llm.apiKey,
+        "x-api-key": call.apiKey,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model,
+        model: call.model,
         max_tokens: 2048,
         messages: [{ role: "user", content: prompt }],
       }),
     },
     timeoutMs
   );
-  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${res.text.slice(0, 500)}`);
-  const data = parseVendorJson(res, model);
+  if (!res.ok)
+    throw new Error(`LLM vendor returned ${res.status} for model "${call.model}": ${res.text.slice(0, 500)}`);
+  const data = parseVendorJson(res, call.model);
   const content = data?.content?.[0]?.text;
-  if (typeof content !== "string") throw new Error(`LLM response missing content block (model "${model}")`);
+  if (typeof content !== "string") throw new Error(`LLM response missing content block (model "${call.model}")`);
   return content;
 }
 
@@ -160,10 +162,39 @@ function coerceFinding(raw: any): Finding | null {
   };
 }
 
-async function callModel(prompt: string, model: string, timeoutMs: number): Promise<string> {
-  return config.llm.vendor === "anthropic"
-    ? callAnthropic(prompt, model, timeoutMs)
-    : callOpenAiCompatible(prompt, model, timeoutMs);
+interface VendorCall {
+  vendor: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+async function callModel(prompt: string, call: VendorCall, timeoutMs: number): Promise<string> {
+  return call.vendor === "anthropic"
+    ? callAnthropic(prompt, call, timeoutMs)
+    : callOpenAiCompatible(prompt, call, timeoutMs);
+}
+
+/**
+ * The primary vendor's own chain (model + fallbackModels) shares one
+ * baseUrl/apiKey, so it can only fall back across *models*, not across an
+ * outage or quota exhaustion of the vendor itself. The optional secondary
+ * vendor is appended at the very end -- tried only once every primary-vendor
+ * model has already failed -- so a completely independent vendor can still
+ * complete the job.
+ */
+function buildChain(): VendorCall[] {
+  const chain: VendorCall[] = [config.llm.model, ...config.llm.fallbackModels].map((model) => ({
+    vendor: config.llm.vendor,
+    baseUrl: config.llm.baseUrl,
+    apiKey: config.llm.apiKey,
+    model,
+  }));
+  const fb = config.llm.fallbackVendor;
+  if (fb.apiKey && fb.model) {
+    chain.push({ vendor: fb.vendor, baseUrl: fb.baseUrl, apiKey: fb.apiKey, model: fb.model });
+  }
+  return chain;
 }
 
 export const llmProvider: Provider = {
@@ -179,12 +210,14 @@ export const llmProvider: Provider = {
     const prompt = buildPrompt(diffText);
 
     // Try the primary (strongest) model first, then walk the fallback chain
-    // in order until one succeeds. The whole chain shares one time budget
-    // (config.llm.chainBudgetMs) so cascading timeouts across several
-    // models can't blow the 30s single-chunk SLA -- each call gets at most
-    // the smaller of the configured per-model timeout and whatever's left
-    // of the shared budget, and we stop trying once that's exhausted.
-    const chain = [config.llm.model, ...config.llm.fallbackModels];
+    // in order until one succeeds -- primary vendor's models, then (if
+    // configured) one call to a completely independent secondary vendor.
+    // The whole chain shares one time budget (config.llm.chainBudgetMs) so
+    // cascading timeouts across several models can't blow the 30s
+    // single-chunk SLA -- each call gets at most the smaller of the
+    // configured per-model timeout and whatever's left of the shared
+    // budget, and we stop trying once that's exhausted.
+    const chain = buildChain();
     const errors: string[] = [];
     let raw: string | null = null;
     // Whichever is tighter: this provider's own chain budget, or what's left
@@ -200,18 +233,26 @@ export const llmProvider: Provider = {
       );
     }
 
-    for (const model of chain) {
+    for (let i = 0; i < chain.length; i++) {
+      const call = chain[i];
       const remaining = deadline - Date.now();
       if (remaining < MIN_USEFUL_TIMEOUT_MS) {
-        errors.push(`${model}: skipped, chain time budget exhausted`);
+        errors.push(`${call.model}: skipped, chain time budget exhausted`);
         break;
       }
-      const callTimeout = Math.min(config.llm.timeoutMs, remaining);
+      // Every attempt but the last is capped at the configured per-model
+      // timeout, tuned for the *primary* vendor's speed, so one stuck call
+      // can't eat the budget every other model needs too. The last attempt
+      // has no "later" to protect -- capping it the same way is why an
+      // 8s-tuned timeout (right for Groq) silently starved a fallback
+      // vendor that needs 10-20s, discovered testing the outage path.
+      const isLastAttempt = i === chain.length - 1;
+      const callTimeout = isLastAttempt ? remaining : Math.min(config.llm.timeoutMs, remaining);
       try {
-        raw = await callModel(prompt, model, callTimeout);
+        raw = await callModel(prompt, call, callTimeout);
         break;
       } catch (err: any) {
-        errors.push(`${model}: ${err?.message ?? err}`);
+        errors.push(`${call.model}: ${err?.message ?? err}`);
       }
     }
 

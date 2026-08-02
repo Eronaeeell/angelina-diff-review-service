@@ -60,7 +60,7 @@ npm run dev             # or: npm run build && npm start
 | **What it is** | Regex/line-based rule engine, 9 fixed rules (`MOCK-001`..`008`, `MOCK-INJ`) | Real AI model call, any OpenAI-compatible vendor or Anthropic |
 | **Speed** | Instant (~10ms) | Real API call, ~0.6-1.5s on Groq; capped at 8s per model |
 | **Determinism** | 100% — same input, same output, always | Varies run to run — real AI judgment |
-| **Failure mode** | Never fails | Falls back through an ordered model chain; if every model fails, job → `status: "failed"` with a clear error, process never crashes |
+| **Failure mode** | Never fails | Falls back through an ordered model chain, then (if configured) an independent second vendor; if everything fails, job → `status: "failed"` with a clear error, process never crashes |
 | **Why this design** | This is what's scored — proves the pipeline works independent of any model | Only needs to exist and degrade gracefully, per the task contract |
 
 ## Verified behaviors
@@ -74,7 +74,7 @@ Two independent live test suites run against the deployed service (no code execu
 | `test/timing.mjs` | 8 | Every job shape against the 30s budget, measured from submission; separates queue wait from run time and exits non-zero if anything is over |
 | `test/demo*.mjs` | — | Human-readable diff-in/findings-out walkthroughs (no assertions, just readable output) |
 
-Run any of them the same way shown above (`BASE`/`TOKEN` env vars). Running these repeatedly against the live service — and probing diff shapes the suite didn't originally cover — is what caught six real bugs — including one that would have put `b/` into every finding's `path` and `id`, and one where the LLM timeout never applied to generation at all, letting a 15s budget produce a 46s job. Details in `SUBMISSION.md`.
+Run any of them the same way shown above (`BASE`/`TOKEN` env vars). Running these repeatedly against the live service — and probing diff shapes the suite didn't originally cover — is what caught eight real bugs — including one that would have put `b/` into every finding's `path` and `id`, and one where the LLM timeout never applied to generation at all, letting a 15s budget produce a 46s job. Details in `SUBMISSION.md`.
 
 ## Environment variables
 
@@ -87,6 +87,7 @@ Run any of them the same way shown above (`BASE`/`TOKEN` env vars). Running thes
 | `LLM_MODEL` | for `llm` provider | Primary (strongest) model id |
 | `LLM_FALLBACK_MODELS` | no | Comma-separated fallback chain, strongest first |
 | `LLM_BASE_URL` | no | API base override. This deployment uses `https://api.groq.com/openai/v1`; any OpenAI-compatible vendor works |
+| `LLM_FALLBACK_VENDOR` / `LLM_FALLBACK_API_KEY` / `LLM_FALLBACK_MODEL` / `LLM_FALLBACK_BASE_URL` | no | An independent second vendor, tried only after every model on the primary vendor has failed. This deployment falls back from Groq to a second OpenRouter account, so a Groq outage or quota exhaustion doesn't fail the job outright. Inactive unless both `LLM_FALLBACK_API_KEY` and `LLM_FALLBACK_MODEL` are set |
 | `LLM_TIMEOUT_MS` | no (27000) | Per-model-call ceiling, covering connect + headers + body. Set to 8000 in this deployment, so the chain can reach its fallbacks inside the budget |
 | `LLM_CHAIN_BUDGET_MS` | no (28000) | Shared budget across the whole chain. Under 30s, not equal to it: the budget is measured from submission, so the job must *finish* inside 30s |
 | `STORE_TTL_MS` | no (24h) | Age at which in-memory jobs/cache/idempotency entries are evicted |
@@ -124,4 +125,4 @@ Always-on process on Railway — required since SSE streaming, background job pr
 
 ## Known limitations & what's next
 
-See `SUBMISSION.md` for the full breakdown — short version: in-memory state doesn't survive a restart, `llm` completes reliably only about half the time on a free tier (queue-dominated, not a code defect — every outcome still lands inside the 30s budget and fails gracefully), and `MOCK-003`/`MOCK-004` use regex/brace heuristics rather than a real parser.
+See `SUBMISSION.md` for the full breakdown — short version: in-memory state doesn't survive a restart, the fallback vendor is a single model rather than a full chain (if both vendors' chains are exhausted the job fails), and `MOCK-003`/`MOCK-004` use regex/brace heuristics rather than a real parser.
