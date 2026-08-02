@@ -35,32 +35,36 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
-async function callOpenAiCompatible(prompt: string): Promise<string> {
+async function callOpenAiCompatible(prompt: string, model: string): Promise<string> {
   const baseUrl = config.llm.baseUrl || "https://api.openai.com/v1";
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${config.llm.apiKey}`,
+  };
+  if (config.llm.httpReferer) headers["HTTP-Referer"] = config.llm.httpReferer;
+  if (config.llm.appTitle) headers["X-Title"] = config.llm.appTitle;
+
   const res = await fetchWithTimeout(
     `${baseUrl}/chat/completions`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.llm.apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
-        model: config.llm.model,
+        model,
         messages: [{ role: "user", content: prompt }],
         temperature: 0,
       }),
     },
     config.llm.timeoutMs
   );
-  if (!res.ok) throw new Error(`LLM vendor returned ${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${await safeText(res)}`);
   const data: any = await res.json();
   const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error("LLM response missing message content");
+  if (typeof content !== "string") throw new Error(`LLM response missing message content (model "${model}")`);
   return content;
 }
 
-async function callAnthropic(prompt: string): Promise<string> {
+async function callAnthropic(prompt: string, model: string): Promise<string> {
   const baseUrl = config.llm.baseUrl || "https://api.anthropic.com/v1";
   const res = await fetchWithTimeout(
     `${baseUrl}/messages`,
@@ -72,17 +76,17 @@ async function callAnthropic(prompt: string): Promise<string> {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: config.llm.model,
+        model,
         max_tokens: 2048,
         messages: [{ role: "user", content: prompt }],
       }),
     },
     config.llm.timeoutMs
   );
-  if (!res.ok) throw new Error(`LLM vendor returned ${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new Error(`LLM vendor returned ${res.status} for model "${model}": ${await safeText(res)}`);
   const data: any = await res.json();
   const content = data?.content?.[0]?.text;
-  if (typeof content !== "string") throw new Error("LLM response missing content block");
+  if (typeof content !== "string") throw new Error(`LLM response missing content block (model "${model}")`);
   return content;
 }
 
@@ -120,20 +124,37 @@ function coerceFinding(raw: any): Finding | null {
   };
 }
 
+async function callModel(prompt: string, model: string): Promise<string> {
+  return config.llm.vendor === "anthropic" ? callAnthropic(prompt, model) : callOpenAiCompatible(prompt, model);
+}
+
 export const llmProvider: Provider = {
   name: "llm",
   async reviewChunk(input: ChunkInput): Promise<Finding[]> {
-    if (!config.llm.vendor || !config.llm.apiKey || !config.llm.model) {
+    if (!config.llm.apiKey || !config.llm.model) {
       throw new Error(
-        "LLM provider is not configured on this server (missing LLM_VENDOR / LLM_API_KEY / LLM_MODEL env vars)"
+        "LLM provider is not configured on this server (missing LLM_API_KEY / LLM_MODEL env vars)"
       );
     }
 
     const diffText = input.files.map((f) => f.raw).join("");
     const prompt = buildPrompt(diffText);
 
-    const raw =
-      config.llm.vendor === "anthropic" ? await callAnthropic(prompt) : await callOpenAiCompatible(prompt);
+    let raw: string;
+    try {
+      raw = await callModel(prompt, config.llm.model);
+    } catch (primaryErr: any) {
+      if (!config.llm.fallbackModel) throw primaryErr;
+      try {
+        raw = await callModel(prompt, config.llm.fallbackModel);
+      } catch (fallbackErr: any) {
+        throw new Error(
+          `Primary model failed (${primaryErr?.message ?? primaryErr}); fallback model also failed (${
+            fallbackErr?.message ?? fallbackErr
+          })`
+        );
+      }
+    }
 
     const arr = extractJsonArray(raw);
     const findings: Finding[] = [];
