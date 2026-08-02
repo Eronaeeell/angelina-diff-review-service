@@ -22,7 +22,30 @@ flowchart LR
 
 Everything after "chunk" is provider-agnostic — chunking, ordering, dedup, caching, and streaming behave identically whichever provider is selected.
 
-## Quick start
+## Try the deployed service
+
+No need to clone or run anything — the service is already live. All you need is the base URL and bearer token (shared separately at submission, not committed here):
+
+```bash
+BASE="<deployed-url>"
+TOKEN="<bearer-token>"
+
+curl -X POST "$BASE/v1/reviews" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"diff":"diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,1 +1,1 @@\n+eval(userInput);\n"}'
+# -> {"jobId":"...","status":"queued"}
+
+curl "$BASE/v1/reviews/<jobId>" -H "Authorization: Bearer $TOKEN"
+# -> status: "done", findings: [{ ruleId: "MOCK-001", title: "eval usage", ... }]
+```
+
+Or run the full verification suite the same way, against the live URL:
+
+```bash
+BASE="<deployed-url>" TOKEN="<bearer-token>" node test/verify.mjs
+```
+
+## Run locally (optional — not needed to evaluate the deployed service)
 
 ```bash
 npm install
@@ -50,11 +73,7 @@ Two independent live test suites run against the deployed service (no code execu
 | `test/proof-scoring-criteria.mjs` | 50 | Same ground, organized 1:1 against the task's own scoring categories, plus a live `llm` call |
 | `test/demo*.mjs` | — | Human-readable diff-in/findings-out walkthroughs (no assertions, just readable output) |
 
-```bash
-BASE=<your-url> TOKEN=<your-token> node test/verify.mjs
-```
-
-Running these repeatedly against the live service is what caught two real bugs (an undersized rate-limit burst, a false-positive regex on `=== null`) — details in `SUBMISSION.md`.
+Run any of them the same way shown above (`BASE`/`TOKEN` env vars). Running these repeatedly against the live service is what caught two real bugs (an undersized rate-limit burst, a false-positive regex on `=== null`) — details in `SUBMISSION.md`.
 
 ## Environment variables
 
