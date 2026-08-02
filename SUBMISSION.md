@@ -87,14 +87,14 @@ Each has a regression check in `verify.mjs` or `timing.mjs` (bug 8 is the except
 
 ## AI tools used
 
-- Built end-to-end with **Claude Code (Sonnet 5)** — this file included.
-- Paired on the diff parser and chunker design; wrote the provider interface and mock rule table by hand-checking each regex against the spec's literal wording.
+- Built end-to-end with an AI coding assistant (Claude Code) — this file included.
+- Used it for the diff parser and chunker design; wrote the provider interface and mock rule table by hand-checking each regex against the spec's literal wording.
 - Verified iteratively by actually running the live service and reading real HTTP responses rather than trusting the implementation on faith — several real bugs (the `=== null` false positive, an undersized rate-limit burst, a missing SSE event on cache-hit jobs) only surfaced because of that, not from reading the code.
 
 ## An AI suggestion I rejected
 
-- While demoing the `llm` provider under concurrent load, Claude found a real gap: the chain time budget bounds a job's own AI-processing time, but not how long it sits **queued** behind other `llm` jobs — so a job could blow the 30s budget purely from queue wait.
-- Claude suggested fixing it immediately: stamp each job with its queue-entry time and subtract elapsed queue wait from its LLM budget.
+- While demoing the `llm` provider under concurrent load, an AI-assisted review surfaced a real gap: the chain time budget bounds a job's own AI-processing time, but not how long it sits **queued** behind other `llm` jobs — so a job could blow the 30s budget purely from queue wait.
+- The suggested fix was to act on it immediately: stamp each job with its queue-entry time and subtract elapsed queue wait from its LLM budget.
 - **I rejected doing it right then**, on two grounds: the realistic risk looked low (a single evaluator's token won't generate sustained concurrent AI traffic), and a timing-sensitive change redeployed just before a scoring window trades a low-probability problem for the immediate risk of a fresh bug.
 
 **Then I measured it, and I was wrong.** Five concurrent `llm` submissions against the deployed service produced:
