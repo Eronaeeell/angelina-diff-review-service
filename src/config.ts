@@ -20,7 +20,12 @@ export const config = {
     vendor: process.env.LLM_VENDOR ?? "", // "anthropic" or anything OpenAI-compatible (openai, groq, openrouter, ...)
     apiKey: process.env.LLM_API_KEY ?? "",
     model: process.env.LLM_MODEL ?? "",
-    fallbackModel: process.env.LLM_FALLBACK_MODEL ?? "",
+    // Ordered, comma-separated list of additional models to fall back to (strongest
+    // first) if the primary model call fails, e.g. "modelB,modelC,modelD".
+    fallbackModels: (process.env.LLM_FALLBACK_MODELS ?? "")
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean),
     baseUrl: process.env.LLM_BASE_URL ?? "", // e.g. https://openrouter.ai/api/v1
     timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 20000),
     // Optional OpenRouter-recommended attribution headers.

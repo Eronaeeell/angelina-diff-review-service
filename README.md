@@ -28,8 +28,8 @@ npm run build && npm start
 | `AUTH_TOKEN` | yes | Bearer token clients must send for all `/v1/*` routes |
 | `LLM_VENDOR` | no | `anthropic` for Anthropic's native Messages API; anything else (or unset) uses an OpenAI-compatible chat-completions call, which covers OpenRouter, Groq, OpenAI itself, etc. |
 | `LLM_API_KEY` | only for `llm` provider | API key for the vendor |
-| `LLM_MODEL` | only for `llm` provider | Primary model id |
-| `LLM_FALLBACK_MODEL` | no | If the primary model call fails, retried once against this model before the job is marked `failed` |
+| `LLM_MODEL` | only for `llm` provider | Primary (strongest) model id |
+| `LLM_FALLBACK_MODELS` | no | Comma-separated ordered fallback chain, strongest first; tried in order if the primary fails, before the job is marked `failed` |
 | `LLM_BASE_URL` | no | Override API base (e.g. `https://openrouter.ai/api/v1`) |
 | `LLM_TIMEOUT_MS` | no (default 20000) | Per-call timeout |
 | `LLM_HTTP_REFERER`, `LLM_APP_TITLE` | no | Optional OpenRouter attribution headers |

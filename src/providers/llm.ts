@@ -140,20 +140,23 @@ export const llmProvider: Provider = {
     const diffText = input.files.map((f) => f.raw).join("");
     const prompt = buildPrompt(diffText);
 
-    let raw: string;
-    try {
-      raw = await callModel(prompt, config.llm.model);
-    } catch (primaryErr: any) {
-      if (!config.llm.fallbackModel) throw primaryErr;
+    // Try the primary (strongest) model first, then walk the fallback chain
+    // in order until one succeeds. The job only fails if every model does.
+    const chain = [config.llm.model, ...config.llm.fallbackModels];
+    const errors: string[] = [];
+    let raw: string | null = null;
+
+    for (const model of chain) {
       try {
-        raw = await callModel(prompt, config.llm.fallbackModel);
-      } catch (fallbackErr: any) {
-        throw new Error(
-          `Primary model failed (${primaryErr?.message ?? primaryErr}); fallback model also failed (${
-            fallbackErr?.message ?? fallbackErr
-          })`
-        );
+        raw = await callModel(prompt, model);
+        break;
+      } catch (err: any) {
+        errors.push(`${model}: ${err?.message ?? err}`);
       }
+    }
+
+    if (raw === null) {
+      throw new Error(`All ${chain.length} configured model(s) failed -- ${errors.join(" | ")}`);
     }
 
     const arr = extractJsonArray(raw);
