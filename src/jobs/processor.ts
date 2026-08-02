@@ -70,6 +70,13 @@ export async function processJob(job: Job): Promise<void> {
 
     const provider = getProvider(job.options.provider);
 
+    // Deadline is anchored to submission (createdAt), not to now: whatever
+    // the job spent queued is already gone from its 30s budget. Without
+    // this, a job that waited 11.6s for a worker still handed the provider
+    // a full 27s call and finished at 38.6s -- measured in production, not
+    // hypothetical.
+    const deadlineAt = job.createdAt + config.jobBudgetMs - config.jobBudgetSafetyMs;
+
     // Kick off every chunk's provider call concurrently (this is what lets
     // e.g. the llm provider process a multi-chunk diff in parallel instead
     // of paying the sum of each chunk's latency), but still await + emit
@@ -81,7 +88,7 @@ export async function processJob(job: Job): Promise<void> {
         [...parsed.lineRecordsByPath].filter(([path]) => pathsInChunk.has(path))
       );
       return provider
-        .reviewChunk({ files: chunkFileList, addedLines, lineRecordsByPath })
+        .reviewChunk({ files: chunkFileList, addedLines, lineRecordsByPath, deadlineAt })
         .then((findings) => sortFindings(dedupe(findings)));
     });
 

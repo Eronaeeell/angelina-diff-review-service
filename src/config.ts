@@ -15,6 +15,14 @@ export const config = {
 
   defaultMaxFindings: 100,
 
+  // The contract's per-job budget: "Jobs with diffs <=64 KiB must reach
+  // `done` within 30 s" -- measured from submission, so queue wait counts
+  // against it. `jobBudgetSafetyMs` is held back so a job that exhausts its
+  // budget still has time to record a terminal state and be observed by a
+  // client polling on a ~1s interval.
+  jobBudgetMs: Number(process.env.JOB_BUDGET_MS ?? 30000),
+  jobBudgetSafetyMs: Number(process.env.JOB_BUDGET_SAFETY_MS ?? 2500),
+
   // In-memory job/cache/idempotency entries older than this are swept
   // periodically so a long-lived process doesn't grow unbounded. Default is
   // generous (well beyond the 48h scoring window) since evicting something

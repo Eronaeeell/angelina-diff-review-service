@@ -148,6 +148,31 @@ async function main() {
     `eval(a); // ${tag}`, 'const k = "sk-ABCDEFGHIJKLMNOPQRST";', 'console.log(1);',
   ]), { provider: "llm" });
 
+  // The case that actually broke: the 30s budget is per job and starts at
+  // submission, so a job queued behind others has already spent part of it.
+  // A provider applying its own fixed timeout on top blew the budget --
+  // measured in production at 11.6s queued + a 27s call = 38.6s.
+  const lt0 = Date.now();
+  const lsubs = await Promise.all(
+    Array.from({ length: 5 }, (_, i) =>
+      submit(diffOf(`q${i}.ts`, [`eval(${i}); // ${tag}`]), { provider: "llm" })
+    )
+  );
+  const lres = await Promise.all(
+    lsubs.filter((s) => s.status === 202).map((s) => poll(s.json.jobId, lt0, 150000))
+  );
+  lres
+    .sort((a, b) => b.clientMs - a.clientMs)
+    .forEach(({ job, clientMs }, i) =>
+      rows.push({
+        label: i === 0 ? "llm / 5 concurrent (slowest)" : `llm / 5 concurrent (#${i + 1})`,
+        clientMs,
+        status: job.status,
+        server: job.timings,
+        note: i === 0 ? job.error?.message?.slice(0, 70) : undefined,
+      })
+    );
+
   const over = report();
   process.exit(over > 0 ? 1 : 0);
 }

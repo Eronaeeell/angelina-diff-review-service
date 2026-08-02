@@ -176,8 +176,18 @@ export const llmProvider: Provider = {
     const chain = [config.llm.model, ...config.llm.fallbackModels];
     const errors: string[] = [];
     let raw: string | null = null;
-    const deadline = Date.now() + config.llm.chainBudgetMs;
+    // Whichever is tighter: this provider's own chain budget, or what's left
+    // of the job's 30s contract budget after queue wait. The second one is
+    // the reason a concurrent burst can't push a job past the budget.
+    const deadline = Math.min(Date.now() + config.llm.chainBudgetMs, input.deadlineAt);
     const MIN_USEFUL_TIMEOUT_MS = 3000;
+
+    const msLeftInBudget = input.deadlineAt - Date.now();
+    if (deadline - Date.now() < MIN_USEFUL_TIMEOUT_MS) {
+      throw new Error(
+        `only ${Math.max(0, msLeftInBudget)}ms left of the job's ${config.jobBudgetMs}ms budget after queue wait -- too little to attempt a model call`
+      );
+    }
 
     for (const model of chain) {
       const remaining = deadline - Date.now();
