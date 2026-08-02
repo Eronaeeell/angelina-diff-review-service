@@ -39,7 +39,18 @@ Both providers implement one interface — `reviewChunk(files, addedLines, lineR
 **`llm`**
 - Vendor-agnostic: any OpenAI-compatible API (OpenRouter, Groq, OpenAI) works via `LLM_BASE_URL`; `LLM_VENDOR=anthropic` switches to Anthropic's native Messages API.
 - The model returns findings as a JSON array matching the `Finding` shape; the response is defensively parsed (strips markdown fences, validates each field, drops anything malformed instead of crashing).
-- `LLM_FALLBACK_MODELS` is an ordered chain, tried in sequence if the primary fails. Ordering came from measurement, not reputation: `llama-3.3-70b-versatile` was both the fastest (726ms) and among the strongest of the candidates, while `qwen3.6-27b` was dropped for emitting reasoning prose around its JSON.
+- **The deployed chain, in order, each tried only after the one before it fails:**
+
+  | # | Vendor | Model |
+  |---|---|---|
+  | 1 (primary) | Groq | `llama-3.3-70b-versatile` |
+  | 2 | Groq | `openai/gpt-oss-120b` |
+  | 3 | Groq | `openai/gpt-oss-20b` |
+  | 4 | Groq | `llama-3.1-8b-instant` |
+  | 5 (cross-vendor) | OpenRouter | `openai/gpt-oss-20b:free` |
+
+  1-4 (`LLM_MODEL` + `LLM_FALLBACK_MODELS`) share one vendor and can only fall back across *models*. 5 (`LLM_FALLBACK_VENDOR`/`LLM_FALLBACK_API_KEY`/`LLM_FALLBACK_MODEL`) is a completely independent vendor and account, reached only if 1-4 all fail.
+- Ordering of 1-4 came from measurement, not reputation: `llama-3.3-70b-versatile` was both the fastest (726ms) and among the strongest of the candidates benchmarked against the real review prompt, while `qwen/qwen3.6-27b` was dropped for emitting reasoning prose around its JSON instead of a clean array.
 - The **whole chain shares one time budget** (`LLM_CHAIN_BUDGET_MS`, 25s) rather than a fresh timeout per model, and every call — connect, headers, **and body** — runs under one abort timer. That last part is load-bearing and I originally got it wrong; see bug 6 below.
 - A chunk's real deadline is the tighter of that chain budget and **what remains of the job's own 30s contract budget**, which is anchored to submission time. Queue wait is therefore charged against the model call rather than added on top of it; see bug 7.
 - `LLM_TIMEOUT_MS` is 8s — roughly 10x the ~0.6-1.5s a call actually takes on Groq. Deliberately not larger for a *non-final* attempt: at 8s the chain can try every Groq model and still finish inside the budget. The **last** attempt in the whole chain is the exception — it gets whatever remains of the budget rather than the 8s cap, because nothing after it needs the time saved (see bug 8).
@@ -49,10 +60,11 @@ Both providers implement one interface — `reviewChunk(files, addedLines, lineR
 
 ## How I verified the cross-cutting behaviors
 
-Two independent, assertion-based suites run against the **live deployed instance** (black-box HTTP, no unit tests against internal functions — the contract is explicitly an HTTP contract):
+Two independent, assertion-based suites, plus a dedicated budget-timing gate, run against the **live deployed instance** (black-box HTTP, no unit tests against internal functions — the contract is explicitly an HTTP contract):
 
 - **`test/verify.mjs` (59 checks):** every mock rule individually (incl. same-line/multi-line/negative empty-catch cases, and negative tests for two false-positive bugs I found — see below), cross-file/cross-line ordering + no-duplicate-ids, `maxFindings` truncation vs. `usage` reflecting the full scan, the full error taxonomy, idempotency, caching, chunking on a >64KiB/4-file diff, SSE replay (finding events from a completed job's stream compared byte-for-byte against the poll endpoint's `findings`, including a cache-hit job — which didn't emit finding events at all until I went looking), 5-way concurrent submission, and rate-limit burst behavior.
 - **`test/proof-scoring-criteria.mjs` (50 checks):** the same ground, reorganized 1:1 against the task's own "What we score" list, plus one live `llm`-provider call.
+- **`test/timing.mjs` (13 job shapes):** every job shape — mock, llm, 5 concurrent mock, 5 concurrent llm — against the 30s budget measured from submission, reporting queue wait separately from run time. Exits non-zero if anything is over, so this is a gate a CI pipeline could hang a deploy on, not just a report.
 - **`test/demo*.mjs`:** readable (non-assertion) walkthroughs for manually eyeballing diff-in vs. findings-out, including a dedicated chunking proof that submits the same files both under and over 64KiB and diffs the resulting findings.
 
 **Eight real bugs were found by running against a live process rather than by reading the code:**
@@ -62,9 +74,7 @@ Two independent, assertion-based suites run against the **live deployed instance
 4. An undersized rate-limit burst (10, raised to 30 — one full minute's sustained quota) that wrongly throttled a legitimate rapid-fire correctness-check run.
 5. A regex false positive: `=== null` / `!== null` was wrongly matching the loose-null-comparison rule.
 6. **The LLM timeout never applied to generation.** `fetchWithTimeout` cleared its abort timer as soon as `fetch()` resolved — but `fetch()` resolves when response *headers* arrive, and an LLM vendor sends headers immediately then streams tokens. The subsequent `res.json()` read the body with no timeout at all, so the "budget" only ever bounded connection latency. A 15s chain budget was observed producing a **46s** job. The body read now stays inside the timer's scope, which makes the 30s guarantee structural instead of aspirational.
-
 7. **Queue wait wasn't charged against the 30s budget.** The budget is per job and starts at submission, but the llm provider applied its own fixed timeout on top of however long the job had already waited for a worker. Measured in production under 5 concurrent submissions: `total=38608ms queued=11607ms` — over budget with no single slow call. Chunks now carry an absolute deadline derived from submission time. This is the fix I had explicitly *rejected* earlier in this file as low-probability; measurement proved it real, so I implemented it.
-
 8. **The per-model timeout starved a slower fallback vendor.** Adding a second vendor (Groq -> OpenRouter) exposed this: every attempt, including the last, was capped at `LLM_TIMEOUT_MS` (8s, tuned for Groq's speed). OpenRouter's free tier needs 10-20s, so the fallback vendor was aborted before it had a real chance -- caught by deliberately simulating a Groq outage and watching the fallback call die at 8s despite ~19s still being available in the budget. The **last** attempt in the chain now gets whatever time remains rather than the fixed cap, since nothing after it needs the time saved; verified by the same simulated-outage test completing via OpenRouter in ~12s.
 
 Each has a regression check in `verify.mjs` or `timing.mjs` (bug 8 is the exception -- reproducing a vendor outage against the live deployment isn't something I'm willing to script against production credentials, so it's a manual local procedure: start the server with a deliberately invalid primary-vendor key and a real fallback-vendor key, submit a job, confirm it completes via the fallback within budget), and is documented in git history rather than silently changed.
