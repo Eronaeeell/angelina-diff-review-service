@@ -144,6 +144,50 @@ async function main() {
     ok(has005("src/null-loose.ts"), "MOCK-005 still fires on loose == null");
   }
 
+  // ---- diff shapes other than `git diff` output ----
+  // The contract says "unified diff", not "git diff": a hand-written diff
+  // often carries the a/ b/ prefixes with no `diff --git` line at all, and
+  // the prefixes must still be stripped or every path/id is wrong.
+  {
+    const noGitHeader = `--- a/src/db.ts\n+++ b/src/db.ts\n@@ -40,1 +41,1 @@\n+const q = "SELECT * FROM t WHERE id=" + id;\n`;
+    const { json: postJson } = await post({ diff: noGitHeader });
+    const job = await waitDone(postJson.jobId);
+    eq(job.findings.map((f) => f.id), ["MOCK-003:src/db.ts:41"], "diff without a `diff --git` line still strips the a/ b/ prefix");
+
+    const noPrefix = `--- src/db.ts\t2024-01-01\n+++ src/db.ts\t2024-01-02\n@@ -40,1 +41,1 @@\n+eval(x);\n`;
+    const job2 = await waitDone((await post({ diff: noPrefix })).json.jobId);
+    eq(job2.findings.map((f) => f.id), ["MOCK-001:src/db.ts:41"], "diff -u style (no prefixes, tab timestamps) parses");
+  }
+
+  // ---- deletion-only diff is valid input, not a parse failure ----
+  {
+    const deleteOnly = `diff --git a/gone.ts b/gone.ts\ndeleted file mode 100644\n--- a/gone.ts\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-console.log(1);\n-eval(x);\n`;
+    const r = await post({ diff: deleteOnly });
+    ok(r.status === 202, "deletion-only diff is accepted (202), not rejected as unparseable");
+    if (r.status === 202) {
+      const job = await waitDone(r.json.jobId);
+      eq(job.status, "done", "deletion-only diff reaches done");
+      eq(job.findings.length, 0, "deletion-only diff yields zero findings (rules apply to added lines only)");
+    }
+  }
+
+  // ---- an added line whose content starts with +/- must not desync numbering ----
+  {
+    const diff = `diff --git a/p.ts b/p.ts\n--- a/p.ts\n+++ b/p.ts\n@@ -1,0 +1,2 @@\n+++ this is content, not a header\n+console.log(1);\n`;
+    const job = await waitDone((await post({ diff })).json.jobId);
+    eq(job.findings.map((f) => f.id), ["MOCK-007:p.ts:2"], "added line starting with '++' does not shift later line numbers");
+  }
+
+  // ---- unknown routes use the error envelope, not Express's HTML 404 ----
+  {
+    const r = await get("/v1/no-such-route");
+    ok(r.status === 404, "unknown /v1 route -> 404");
+    eq(r.json?.error?.code, "not_found", "unknown /v1 route returns the error envelope, not HTML");
+    const pub = await fetch(`${BASE}/no-such-route`);
+    const pubJson = await pub.json().catch(() => null);
+    eq(pubJson?.error?.code, "not_found", "unknown public route returns the error envelope too");
+  }
+
   // ---- negative: clean code produces zero findings ----
   {
     const diff = diffFor(["const x = 1;", "function add(a, b) { return a + b; }"]);
